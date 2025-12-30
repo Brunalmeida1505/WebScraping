@@ -1,2 +1,8 @@
 venv/
+.venv
 .vscode/
+.idea/
+temp/
+urls.txt
+dados.csv
+.log
