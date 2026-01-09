@@ -4,11 +4,15 @@ from selenium.webdriver.chrome.service import Service
 
 from scrapers.circulo_scraper import CirculoScraper
 from scrapers.mariskavos_scraper import MariskavosScraper
+from scrapers.always_free_amigurumi_scraper import AlwaysFreeAmigurumiScraper
+from scrapers.lovecrafts_scraper import LovecraftsScraper
 
 # Maps scraper names to their classes
 AVAILABLE_SCRAPERS = {
     "circulo": CirculoScraper,
     "mariskavos": MariskavosScraper,
+    "alwaysfreeamigurumi": AlwaysFreeAmigurumiScraper,
+    "lovecrafts": LovecraftsScraper,
 }
 
 def setup_driver(headless: bool = True) -> webdriver.Chrome:
@@ -59,8 +63,8 @@ def main():
     parser.add_argument(
         '--max-pages',
         type=int,
-        default=5,
-        help='(Mariskavos) Max number of pages to scrape.'
+        default=50,
+        help='(Mariskavos & AlwaysFreeAmigurumi) Max number of pages to scrape.'
     )
 
     args = parser.parse_args()
