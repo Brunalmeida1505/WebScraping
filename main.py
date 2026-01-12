@@ -15,8 +15,10 @@ AVAILABLE_SCRAPERS = {
     "lovecrafts": LovecraftsScraper,
 }
 
-def setup_driver(headless: bool = True) -> webdriver.Chrome:
+def setup_driver(headless: bool = True, scraper_name: str = None) -> webdriver.Chrome:
     """Configures and initializes the Chrome WebDriver."""
+    import os
+    
     service = Service()
     options = webdriver.ChromeOptions()
     if headless:
@@ -27,6 +29,19 @@ def setup_driver(headless: bool = True) -> webdriver.Chrome:
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.page_load_strategy = 'eager'
+    
+    # Special configuration for Lovecrafts (needs PDF download)
+    if scraper_name == "lovecrafts":
+        download_dir = os.path.join(os.getcwd(), "downloads")
+        options.add_argument("--start-maximized")
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
+        options.add_experimental_option("prefs", {
+            "download.default_directory": download_dir,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "plugins.always_open_pdf_externally": True
+        })
+    
     driver = webdriver.Chrome(service=service, options=options)
     return driver
 
@@ -76,7 +91,7 @@ def main():
         scraper_class = AVAILABLE_SCRAPERS[args.scraper]
         
         print(f"Setting up WebDriver for '{scraper_class.__name__}'...")
-        driver = setup_driver(headless=not args.no_headless)
+        driver = setup_driver(headless=not args.no_headless, scraper_name=args.scraper)
         
         # 2. Instantiate the scraper strategy
         scraper_strategy = scraper_class(driver)

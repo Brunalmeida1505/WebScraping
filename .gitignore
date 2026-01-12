@@ -6,3 +6,6 @@ temp/
 urls.txt
 dados.csv
 .log
+.env
+downloads/
+downloads_test/

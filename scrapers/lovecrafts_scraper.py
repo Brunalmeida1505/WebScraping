@@ -1,681 +1,441 @@
 import os
 import time
-import traceback
-import getpass  # Para ler a senha de forma segura no terminal
-import csv
+import getpass
+import pandas as pd
 import pdfplumber
-
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
+from pathlib import Path
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
-# --- CONSTANTES ---
-LOGIN_URL = "https://www.lovecrafts.com/en-gb/account/auth/sign-in"
-SEARCH_URL = 'https://www.lovecrafts.com/en-gb/search?q=free%20amigurumi'
+from scrapers.base_scraper import ScraperStrategy
 
-# --- FUNÇÕES AUXILIARES ---
+# Try to load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent / '.env'
+    load_dotenv(dotenv_path=env_path, override=True)  # override=True to overwrite existing env vars
+except ImportError:
+    pass  # python-dotenv not installed, will use environment variables or prompt
 
-def setup_driver():
-    """Configura e retorna uma instância do Chrome WebDriver."""
-    print("1. Configurando o navegador (Chrome)...")
-    
-    download_dir = os.path.join(os.getcwd(), "downloads")
-    if not os.path.exists(download_dir):
-        os.makedirs(download_dir)
-        print(f"✓ Diretório de downloads criado em: {download_dir}")
+class LovecraftsScraper(ScraperStrategy):
+    """Scraper for recipes from lovecrafts.com (requires login and PDF download)."""
 
-    service = Service()
-    options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
-    
-    options.add_experimental_option("prefs", {
-        "download.default_directory": download_dir,
-        "download.prompt_for_download": False,
-        "download.directory_upgrade": True,
-        "plugins.always_open_pdf_externally": True
-    })
+    def __init__(self, driver):
+        super().__init__(driver)
+        self.wait = WebDriverWait(driver, 10)
+        self.name = "Lovecrafts"
+        self.login_url = "https://www.lovecrafts.com/en-gb/account/auth/sign-in"
+        self.search_url = 'https://www.lovecrafts.com/en-gb/search?q=free%20amigurumi'
+        self.db_dir = 'db'
+        self.url_file_path = os.path.join(self.db_dir, 'lovecrafts_urls.txt')
+        self.csv_file_path = os.path.join(self.db_dir, 'resultados', 'lovecrafts_dados.csv')
+        self.download_dir = os.path.join(os.getcwd(), "downloads")
+        self.is_logged_in = False
 
-    driver = webdriver.Chrome(service=service, options=options)
-    print("✓ Navegador configurado.")
-    return driver
+    def get_name(self) -> str:
+        return self.name
 
-def type_text(driver, by, value, text, timeout=10):
-    """Encontra um campo e digita o texto nele."""
-    try:
-        wait = WebDriverWait(driver, timeout)
-        element = wait.until(EC.visibility_of_element_located((by, value)))
-        element.clear()
-        element.send_keys(text)
-        print(f"✓ Texto digitado no campo: ({by}, {value})")
-        return True
-    except TimeoutException:
-        print(f"✗ Campo de texto não encontrado a tempo: ({by}, {value})")
+    def _setup_download_dir(self):
+        """Creates the download directory if it doesn't exist."""
+        if not os.path.exists(self.download_dir):
+            os.makedirs(self.download_dir)
+            print(f"✓ Download directory created: {self.download_dir}")
+
+    def _handle_cookie_banner(self):
+        """Attempts to close cookie consent banner."""
+        print("Checking for cookie consent banner...")
+        accept_selectors = [
+            (By.ID, "onetrust-accept-btn-handler"),
+            (By.XPATH, '//button[contains(text(), "Accept")]'),
+            (By.XPATH, '//button[contains(text(), "Accept All")]'),
+            (By.XPATH, '//button[contains(text(), "I agree")]'),
+        ]
+        
+        for by, selector in accept_selectors:
+            try:
+                element = WebDriverWait(self.driver, 3).until(
+                    EC.element_to_be_clickable((by, selector))
+                )
+                element.click()
+                print("✓ Cookie banner closed.")
+                time.sleep(1)
+                return True
+            except (TimeoutException, NoSuchElementException):
+                continue
+        
+        print("Cookie banner not found or already accepted.")
         return False
 
-def click_element(driver, by, value, timeout=10):
-    """Aguarda um elemento ser clicável e clica nele."""
-    try:
-        wait = WebDriverWait(driver, timeout)
-        element = wait.until(EC.element_to_be_clickable((by, value)))
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-        time.sleep(0.5)
-        element.click()
-        print(f"✓ Elemento clicado: ({by}, {value})")
-        return True
-    except TimeoutException:
-        print(f"✗ Elemento não encontrado ou não clicável a tempo: ({by}, {value})")
-        return False
+    def _perform_login(self, email: str, password: str) -> bool:
+        """Performs login to Lovecrafts."""
+        print(f"\n--- Starting login process ---")
+        print(f"Accessing login page: {self.login_url}")
+        self.driver.get(self.login_url)
+        time.sleep(2)
 
-def setup_csv(filename="receitas.csv"):
-    """Cria o arquivo CSV com o cabeçalho se ele não existir."""
-    fieldnames = ['titulo', 'abreviacoes', 'receita', 'origem']
-    if not os.path.exists(filename):
-        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-        print(f"✓ Arquivo CSV '{filename}' criado com sucesso.")
+        self._handle_cookie_banner()
 
-def append_to_csv(data, filename="receitas.csv"):
-    """Adiciona uma linha de dados ao arquivo CSV."""
-    fieldnames = ['titulo', 'abreviacoes', 'receita', 'origem']
-    with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writerow(data)
-    print(f"✓ Dados da receita '{data.get('titulo', 'N/A')}' salvos no CSV.")
-
-def parse_pdf(pdf_path):
-    """
-    Extrai o conteúdo de um arquivo PDF e tenta separar em
-    título, abreviações e receita.
-    """
-    print(f"   - Lendo o arquivo PDF: {os.path.basename(pdf_path)}")
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            full_text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    full_text += page_text + "\n"
-
-            titulo = os.path.basename(pdf_path).replace('.pdf', '').replace('_', ' ').strip()
-            abreviacoes = ""
-            receita = full_text
-
-            lower_text = full_text.lower()
-            abbreviations_kw = "abbreviations"
-            pattern_kw = "pattern"
-
-            abbrev_pos = lower_text.find(abbreviations_kw)
-            pattern_pos = lower_text.find(pattern_kw)
-
-            if abbrev_pos != -1 and pattern_pos != -1 and abbrev_pos < pattern_pos:
-                abreviacoes = full_text[abbrev_pos : pattern_pos]
-                receita = full_text[pattern_pos:]
-            elif abbrev_pos != -1:
-                 abreviacoes = full_text[abbrev_pos:]
-                 receita = ""
+        print("Filling login form...")
+        try:
+            # Email field
+            email_field = self.wait.until(EC.visibility_of_element_located((By.ID, "email")))
+            email_field.clear()
+            email_field.send_keys(email)
+            time.sleep(0.5)
+            print(f"   ✓ Email entered: {email}")
             
-            lines = full_text.split('\n')
-            if lines and len(lines[0].strip()) > 3:
-                titulo = lines[0].strip()
+            # Password field
+            password_field = self.wait.until(EC.visibility_of_element_located((By.ID, "password")))
+            password_field.clear()
+            password_field.send_keys(password)
+            time.sleep(0.5)
+            print(f"   ✓ Password entered")
+            
+            # Submit button
+            submit_button = self.wait.until(EC.element_to_be_clickable(
+                (By.XPATH, '//button[@type="submit" and contains(., "Sign In & Continue")]')
+            ))
+            print("   Clicking login button...")
+            submit_button.click()
+            time.sleep(1)
+            
+            # Wait for redirect after login or check for error messages
+            try:
+                # Check if login was successful by waiting for URL change
+                WebDriverWait(self.driver, 15).until(EC.url_changes(self.login_url))
+                print("✓ Login successful.")
+                self.is_logged_in = True
+                return True
+            except TimeoutException:
+                # Check if there's an error message on the page
+                try:
+                    error_element = self.driver.find_element(By.XPATH, '//*[contains(@class, "error") or contains(@class, "alert")]')
+                    error_msg = error_element.text
+                    print(f"✗ Login failed: {error_msg}")
+                except NoSuchElementException:
+                    # Check current URL to see if we're still on login page
+                    current_url = self.driver.current_url
+                    if self.login_url in current_url:
+                        print("✗ Login failed: Still on login page after 15 seconds.")
+                        print("   Possible reasons:")
+                        print("   - Incorrect email or password")
+                        print("   - Account locked or requires verification")
+                        print("   - Site might require additional verification (CAPTCHA, 2FA)")
+                    else:
+                        print(f"✓ Login appears successful (redirected to: {current_url})")
+                        self.is_logged_in = True
+                        return True
+                return False
+            
+        except TimeoutException as e:
+            print(f"✗ Login error: Element not found - {e}")
+            print("   The login page structure might have changed.")
+            return False
+        except Exception as e:
+            print(f"✗ Login error: {e}")
+            return False
 
-            print("   - ✓ Leitura do PDF concluída.")
-            return {
-                "titulo": titulo,
-                "abreviacoes": abreviacoes.strip(),
-                "receita": receita.strip(),
-                "origem": "lovecrafts"
-            }
-    except Exception as e:
-        print(f"   - ✗ Erro ao ler ou processar o PDF: {e}")
+    def collect_recipe_urls(self) -> set:
+        """Collects all recipe URLs from search results with pagination."""
+        if not self.is_logged_in:
+            print("✗ Cannot collect URLs: Not logged in.")
+            return set()
+
+        print(f"\n--- Starting URL collection ---")
+        print(f"Accessing search page: {self.search_url}")
+        self.driver.get(self.search_url)
+        time.sleep(2)
+        
+        recipe_urls = set()
+        page_num = 1
+        
+        while True:
+            print(f"Collecting URLs from page {page_num}...")
+            try:
+                WebDriverWait(self.driver, 10).until(
+                    EC.visibility_of_element_located((By.XPATH, "//ul[contains(@class, 'products')]"))
+                )
+                
+                product_links = self.driver.find_elements(By.XPATH, "//ul[contains(@class, 'products')]/li//a")
+                page_urls = set([link.get_attribute('href') for link in product_links if link.get_attribute('href')])
+                new_urls = page_urls - recipe_urls
+                recipe_urls.update(new_urls)
+                print(f"   Found {len(new_urls)} new recipes on this page.")
+                
+                # Try to click "Next" button
+                try:
+                    next_button = self.driver.find_element(By.XPATH, '//a[@aria-label="Next"]')
+                    if next_button.is_displayed() and next_button.is_enabled():
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
+                        time.sleep(0.3)
+                        next_button.click()
+                        page_num += 1
+                        time.sleep(2)
+                    else:
+                        print("✓ Pagination ended (Next button disabled).")
+                        break
+                except NoSuchElementException:
+                    print("✓ Pagination ended (Next button not found).")
+                    break
+                    
+            except TimeoutException:
+                print("✗ Product list did not load. Ending URL collection.")
+                break
+        
+        print(f"\n✓ URL collection finished: {len(recipe_urls)} recipes found.")
+        return recipe_urls
+
+    def _wait_for_download_complete(self, timeout=30):
+        """Waits for a PDF download to complete and returns the file path."""
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            in_progress = [f for f in os.listdir(self.download_dir) if f.endswith('.crdownload')]
+            if not in_progress:
+                pdf_files = [os.path.join(self.download_dir, f) 
+                            for f in os.listdir(self.download_dir) if f.lower().endswith('.pdf')]
+                if pdf_files:
+                    latest_file = max(pdf_files, key=os.path.getmtime)
+                    if time.time() - os.path.getmtime(latest_file) < 10:
+                        print(f"   ✓ Download complete: {os.path.basename(latest_file)}")
+                        return latest_file
+            time.sleep(0.3)  # Check more frequently
+        
+        print("   ✗ Download timeout exceeded.")
         return None
 
-def wait_for_download_complete(download_dir, timeout=60):
-    """
-    Espera um download ser concluído em um diretório, monitorando
-    arquivos '.crdownload'. Retorna o path do novo arquivo.
-    """
-    print("   - Aguardando o download ser concluído...")
-    start_time = time.time()
-    
-    while time.time() - start_time < timeout:
-        in_progress_downloads = [f for f in os.listdir(download_dir) if f.endswith('.crdownload')]
-        if not in_progress_downloads:
-            pdf_files = [os.path.join(download_dir, f) for f in os.listdir(download_dir) if f.lower().endswith('.pdf')]
-            if pdf_files:
-                latest_file = max(pdf_files, key=os.path.getmtime)
-                if time.time() - os.path.getmtime(latest_file) < 15: # Arquivo modificado nos últimos 15s
-                    print(f"   - ✓ Download concluído: {os.path.basename(latest_file)}")
-                    return latest_file
+    def _parse_pdf(self, pdf_path: str) -> dict:
+        """Extracts content from a PDF and separates into title, abbreviations, and recipe."""
+        print(f"   Reading PDF: {os.path.basename(pdf_path)}")
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                full_text = ""
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        full_text += page_text + "\n"
+
+                # Extract title from filename or first line
+                titulo = os.path.basename(pdf_path).replace('.pdf', '').replace('_', ' ').strip()
+                lines = full_text.split('\n')
+                if lines and len(lines[0].strip()) > 3:
+                    titulo = lines[0].strip()
+
+                # Separate abbreviations and pattern
+                abreviacoes = ""
+                receita = full_text
+                
+                lower_text = full_text.lower()
+                abbrev_pos = lower_text.find("abbreviations")
+                pattern_pos = lower_text.find("pattern")
+
+                if abbrev_pos != -1 and pattern_pos != -1 and abbrev_pos < pattern_pos:
+                    abreviacoes = full_text[abbrev_pos:pattern_pos]
+                    receita = full_text[pattern_pos:]
+                elif abbrev_pos != -1:
+                    abreviacoes = full_text[abbrev_pos:]
+                    receita = ""
+
+                print("   ✓ PDF reading complete.")
+                return {
+                    "titulo": titulo,
+                    "materiais": abreviacoes.strip(),
+                    "receita": receita.strip()
+                }
+        except Exception as e:
+            print(f"   ✗ Error reading PDF: {e}")
+            return None
+
+    def extract_recipe_details(self, url: str) -> dict:
+        """Downloads PDF from a recipe page and extracts its content."""
+        print(f"Processing recipe: {url}")
         
-        time.sleep(1)
-    
-    print("   - ✗ Tempo de espera para o download excedido.")
-    return None
+        try:
+            self.driver.get(url)
+            time.sleep(1.5)  # Reduced from 3
 
+            recipe_data = {'url': url, 'titulo': '', 'materiais': '', 'receita': '', 'origem': self.name}
 
-
-def fazer_login(driver, email, password):
-    """Navega para a página de login e executa o login."""
-    print("\n--- INICIANDO PROCESSO DE LOGIN ---")
-    print(f"2. Acessando a página de login: {LOGIN_URL}")
-    driver.get(LOGIN_URL)
-
-    # --- Etapa 2.5: Tentar fechar o banner de cookies/promoção ---
-    print("\n2.5. Procurando por banners (cookies/promoções) para fechar...")
-    
-    accept_selectors = [
-        (By.ID, "onetrust-accept-btn-handler"),
-        (By.XPATH, '//button[contains(text(), "Accept")]'),
-        (By.XPATH, '//button[contains(text(), "Accept All")]'),
-        (By.XPATH, '//button[contains(text(), "I agree")]'),
-    ]
-    
-    banner_closed = False
-    for by, selector in accept_selectors:
-        if click_element(driver, by, selector, timeout=3):
-            print(f"   ✓ Banner fechado com sucesso usando o seletor: ({by}, {selector})")
-            banner_closed = True
-            time.sleep(1)
-            break
-
-    if not banner_closed:
-        print("   ! Aviso: Nenhum banner de cookies foi encontrado ou fechado. O script continuará.")
-
-    print("\n3. Preenchendo o formulário de login...")
-    if not type_text(driver, By.ID, "email", email):
-        return False
-    
-    if not type_text(driver, By.ID, "password", password):
-        return False
-        
-    print("4. Clicando no botão 'Sign In & Continue'...")
-    if not click_element(driver, By.XPATH, '//button[@type="submit" and contains(., "Sign In & Continue")]'):
-        print("   - FALHA: Não foi possível clicar no botão de login.")
-        return False
-    
-    # Aguarda o login ser processado
-    try:
-        WebDriverWait(driver, 15).until(EC.url_changes(LOGIN_URL))
-        print("✓ Login parece ter sido bem-sucedido (URL mudou).")
-        print("--- FIM DO PROCESSO DE LOGIN ---")
-        return True
-    except TimeoutException:
-        print("✗ FALHA NO LOGIN: A página não redirecionou após a tentativa de login.")
-        print("   - Verifique se o email e a senha estão corretos.")
-        print("--- FIM DO PROCESSO DE LOGIN ---")
-        return False
-
-# --- SCRIPT PRINCIPAL ---
-def main():
-
-
-
-    """Função principal que faz login, busca todas as receitas,
-
-
-
-    baixa os PDFs e salva as informações em um CSV."""
-
-    # --- Coleta de Credenciais ---
-
-
-
-    lc_email = os.environ.get('LOVECRAFTS_EMAIL')
-
-
-    lc_password = os.environ.get('LOVECRAFTS_PASSWORD')
-
-
-
-
-
-
-
-    if not lc_email:
-
-
-
-        lc_email = input("Digite seu email da Lovecrafts: ")
-
-
-
-    if not lc_password:
-
-
-
-        lc_password = getpass.getpass("Digite sua senha da Lovecrafts: ")
-
-
-
-
-
-
-
-    driver = setup_driver()
-
-
-
-    download_dir = os.path.join(os.getcwd(), "downloads")
-
-
-
-    
-
-
-
-    try:
-
-
-
-        # --- Etapa 1: Fazer Login ---
-
-
-
-        if not fazer_login(driver, lc_email, lc_password):
-
-
-
-            return  # Encerra se o login falhar
-
-
-
-
-
-
-
-        # --- Etapa 2: Coletar URLs de todas as receitas da busca ---
-
-
-
-        print(f"\n--- INICIANDO COLETA DE RECEITAS ---")
-
-
-
-        print(f"5. Acessando a página de busca: {SEARCH_URL}")
-
-
-
-        driver.get(SEARCH_URL)
-
-
-
-        
-
-
-
-        recipe_urls = []
-
-
-
-        page_num = 1
-
-
-
-        while True:
-
-
-
-            print(f"\n6. Lendo receitas da página {page_num}...")
-
-
-
+            # Try to close any pop-ups or overlays first
             try:
-
-
-
-                WebDriverWait(driver, 15).until(
-
-
-
-                    EC.visibility_of_element_located((By.XPATH, "//ul[contains(@class, 'products')]"))
-
-
-
-                )
-
-
-
-            except TimeoutException:
-
-
-
-                print("✗ A lista de produtos não carregou. Encerrando coleta de URLs.")
-
-
-
-                break
-
-
-
-
-
-
-
-            product_links = driver.find_elements(By.XPATH, "//ul[contains(@class, 'products')]/li//a")
-
-
-
-            page_urls = list(set([link.get_attribute('href') for link in product_links if link.get_attribute('href')]))
-
-
-
-            new_urls = [url for url in page_urls if url not in recipe_urls]
-
-
-
-            recipe_urls.extend(new_urls)
-
-
-
-            print(f"   - {len(new_urls)} novas receitas encontradas na página.")
-
-
-
-
-
-
-
-            try:
-
-
-
-                next_button = driver.find_element(By.XPATH, '//a[@aria-label="Next"]')
-
-
-
-                if next_button.is_displayed() and next_button.is_enabled():
-
-
-
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
-
-
-
-                    time.sleep(0.5)
-
-
-
-                    next_button.click()
-
-
-
-                    page_num += 1
-
-
-
-                    time.sleep(3)
-
-
-
-                else:
-
-
-
-                    print("✓ Fim da paginação (botão 'Next' desabilitado).")
-
-
-
-                    break
-
-
-
-            except Exception:
-
-
-
-                print("✓ Fim da paginação (botão 'Next' não encontrado).")
-
-
-
-                break
-
-
-
-        
-
-
-
-        print(f"\n--- COLETA FINALIZADA: {len(recipe_urls)} RECEITAS ENCONTRADAS ---")
-
-
-
-
-
-
-
-        # --- Etapa 3: Processar cada receita ---
-
-
-
-        print("\n--- INICIANDO DOWNLOAD E PROCESSAMENTO DOS PDFS ---")
-
-
-
-        setup_csv()
-
-
-
-
-
-
-
-        for i, url in enumerate(recipe_urls):
-
-
-
-            print(f"\n[{i+1}/{len(recipe_urls)}] Processando receita: {url}")
-
-
-
-            driver.get(url)
-
-
-
-            time.sleep(2)
-
-
-
-
-
-
-
+                close_selectors = [
+                    (By.XPATH, '//button[@aria-label="Close"]'),
+                    (By.XPATH, '//button[contains(@class, "close")]'),
+                    (By.XPATH, '//button[contains(text(), "×")]'),
+                ]
+                for by, selector in close_selectors:
+                    try:
+                        close_btn = WebDriverWait(self.driver, 1).until(
+                            EC.element_to_be_clickable((by, selector))
+                        )
+                        close_btn.click()
+                        print("   ✓ Closed pop-up/overlay")
+                        time.sleep(0.5)
+                        break
+                    except:
+                        continue
+            except:
+                pass
+
+            # Scroll to ensure button is in view
+            self.driver.execute_script("window.scrollTo(0, 400);")
+            time.sleep(0.3)
+
+            # Try to find and click download/add to library button
             possible_selectors = [
-
-
-
-                (By.XPATH, '//button[contains(translate(., "DOWNLOAD", "download"), "download")]'),
-
-
-
-                (By.XPATH, '//a[contains(translate(., "DOWNLOAD", "download"), "download")]'),
-
-
-
                 (By.XPATH, '//button[contains(translate(., "ADD TO LIBRARY", "add to library"), "add to library")]'),
-
-
-
                 (By.XPATH, '//button[contains(translate(., "FREE", "free"), "free")]'),
-
-
-
+                (By.XPATH, '//button[contains(translate(., "DOWNLOAD", "download"), "download")]'),
+                (By.XPATH, '//a[contains(translate(., "DOWNLOAD", "download"), "download")]'),
             ]
-
-
-
+            
             button_clicked = False
-
-
-
             for by, selector in possible_selectors:
-
-
-
-                if click_element(driver, by, selector, timeout=5):
-
-
-
+                try:
+                    element = WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((by, selector))
+                    )
+                    # Scroll to element
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                    time.sleep(0.3)
+                    
+                    # Try JavaScript click if regular click fails
+                    try:
+                        WebDriverWait(self.driver, 2).until(EC.element_to_be_clickable((by, selector)))
+                        element.click()
+                    except:
+                        self.driver.execute_script("arguments[0].click();", element)
+                    
+                    print(f"   ✓ Button clicked")
                     button_clicked = True
-
-
-
                     break
-
-
-
+                except (TimeoutException, NoSuchElementException):
+                    continue
+                except Exception as e:
+                    continue
             
-
-
-
             if not button_clicked:
+                print("   ✗ No download button found. Skipping.")
+                return recipe_data
 
-
-
-                print("   - FALHA: Nenhum botão de download encontrado. Pulando.")
-
-
-
-                continue
-
-
-
-
-
-
-
-            time.sleep(3)
-
-
-
+            time.sleep(1.5)  # Reduced from 3
             
-
-
-
-            in_library_selector = (By.XPATH, '//*[contains(text(), "In your library")]')
-
-
-
-            download_link_selector_str = '//a[contains(@href, ".pdf")] | //a[contains(translate(., "DOWNLOAD", "download"), "download")]'
-
-
-
-
-
-
-
+            # Try to find final download link after adding to library
             try:
-
-
-
-                WebDriverWait(driver, 3).until(EC.visibility_of_element_located(in_library_selector))
-
-
-
-                print("   - Receita adicionada à biblioteca. Tentando clicar no download final.")
-
-
-
-                if not click_element(driver, By.XPATH, download_link_selector_str):
-
-
-
-                    print("   - AVISO: Não foi possível clicar no link de download final.")
-
-
-
+                WebDriverWait(self.driver, 2).until(
+                    EC.visibility_of_element_located((By.XPATH, '//*[contains(text(), "In your library")]'))
+                )
+                print("   Recipe added to library. Clicking final download link.")
+                try:
+                    download_link = self.driver.find_element(
+                        By.XPATH, '//a[contains(@href, ".pdf")] | //a[contains(translate(., "DOWNLOAD", "download"), "download")]'
+                    )
+                    # Use JavaScript click for download link
+                    self.driver.execute_script("arguments[0].click();", download_link)
+                except NoSuchElementException:
+                    print("   ✗ Could not find final download link.")
             except TimeoutException:
+                pass
 
-
-
-                pass 
-
-
-
-            
-
-
-
-            downloaded_pdf = wait_for_download_complete(download_dir)
-
-
-
+            # Wait for PDF download and parse it
+            downloaded_pdf = self._wait_for_download_complete()
             if downloaded_pdf:
-
-
-
-                pdf_data = parse_pdf(downloaded_pdf)
-
-
-
+                pdf_data = self._parse_pdf(downloaded_pdf)
                 if pdf_data:
-
-
-
-                    append_to_csv(pdf_data)
-
-
-
+                    recipe_data.update(pdf_data)
             else:
+                print("   ✗ PDF download not completed or not found.")
 
+            return recipe_data
+            
+        except Exception as e:
+            print(f"   ✗ An unexpected error occurred: {str(e)[:200]}")
+            return {'url': url, 'titulo': '', 'materiais': '', 'receita': '', 'origem': self.name}
 
+    def run(self, args: dict):
+        """Main orchestration method for Lovecrafts scraper."""
+        os.makedirs(os.path.join(self.db_dir, "resultados"), exist_ok=True)
+        self._setup_download_dir()
 
-                print("   - FALHA: O download do PDF não foi concluído ou não foi encontrado.")
+        # Get credentials
+        lc_email = os.environ.get('LOVECRAFTS_EMAIL')
+        lc_password = os.environ.get('LOVECRAFTS_PASSWORD')
 
+        if not lc_email:
+            lc_email = input("Enter your Lovecrafts email: ")
+        if not lc_password:
+            lc_password = getpass.getpass("Enter your Lovecrafts password: ")
 
+        # Perform login
+        if not self._perform_login(lc_email, lc_password):
+            print("✗ Scraper halted due to login failure.")
+            print("   Please verify your credentials in the .env file or when prompted.")
+            return
 
-
-
-
-
-        print("\n--- PROCESSO FINALIZADO ---")
-
-
-
-
-
-
-
-    except Exception:
-
-
-
-        print("\n✗ Ocorreu um erro inesperado no script!")
-
-
-
-        traceback.print_exc()
-
-
-
+        # Collect URLs
+        urls_remotas = self.collect_recipe_urls()
         
+        if not urls_remotas:
+            print("✗ No recipe URLs found. Halting.")
+            return
 
+        # Load existing URLs to compare
+        urls_locais = set()
+        if os.path.exists(self.url_file_path):
+            with open(self.url_file_path, 'r', encoding='utf-8') as f:
+                urls_locais = set(line.strip() for line in f if line.strip())
 
+        # Determine mode and URLs to process
+        is_force_mode = args.get('force', False)
+        
+        if is_force_mode:
+            urls_to_process = sorted(list(urls_remotas))
+        else:
+            urls_to_process = sorted(list(urls_remotas - urls_locais))
 
-    finally:
+        # Check if CSV exists - if not, force first run
+        if not os.path.exists(self.csv_file_path) and not is_force_mode:
+            print(f"Data file '{self.csv_file_path}' not found. Activating forced first run mode.")
+            is_force_mode = True
+            urls_to_process = sorted(list(urls_remotas))
 
+        # Update URL file after determining what to process
+        with open(self.url_file_path, 'w', encoding='utf-8') as f:
+            for url in sorted(list(urls_remotas)):
+                f.write(f"{url}\n")
+        print(f"✓ URLs saved to '{self.url_file_path}'")
 
+        if args.get('update_urls_only'):
+            print("Lovecrafts scraper: URLs updated. Halting as requested.")
+            return
 
-        print("\n10. Fechando o navegador.")
+        if not urls_to_process:
+            print("Lovecrafts scraper: No new recipes to process.")
+            return
 
+        print(f"\n--- Starting detail extraction for {len(urls_to_process)} recipes ---")
+        all_recipes_data = []
+        
+        for i, url in enumerate(urls_to_process):
+            print(f"\n[{i+1}/{len(urls_to_process)}]")
+            recipe_data = self.extract_recipe_details(url)
+            if recipe_data and recipe_data.get('titulo'):
+                all_recipes_data.append(recipe_data)
 
-
-        driver.quit()
-
-
-
-
-
-
-
-if __name__ == "__main__":
-
-
-
-    main()
+        # Save to CSV
+        if all_recipes_data:
+            df = pd.DataFrame(all_recipes_data, columns=['titulo', 'url', 'materiais', 'receita', 'origem'])
+            
+            if is_force_mode or not os.path.exists(self.csv_file_path):
+                df.to_csv(self.csv_file_path, sep=';', index=False, encoding='utf-8-sig')
+            else:
+                df.to_csv(self.csv_file_path, mode='a', sep=';', index=False, encoding='utf-8-sig', header=False)
+            
+            print(f"\n✓ Successfully processed {len(all_recipes_data)} recipes.")
+            print(f"✓ Data saved to '{self.csv_file_path}'")
+        else:
+            print("No recipe data was extracted.")
 
 
