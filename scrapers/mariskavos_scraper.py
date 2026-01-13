@@ -94,7 +94,8 @@ class MariskavosScraper(ScraperStrategy):
     def run(self, args: dict):
         os.makedirs(os.path.join(self.db_dir, "resultados"), exist_ok=True)
 
-        urls_to_process = self.collect_recipe_urls(max_pages=args.get('max_pages', 5))
+        max_pages = args.get('max_pages') or 5  # Default to 5 if None
+        urls_to_process = self.collect_recipe_urls(max_pages=max_pages)
         
         if not urls_to_process:
             print(f"{self.name} scraper: No recipe URLs found. Halting.")

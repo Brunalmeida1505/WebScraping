@@ -1,6 +1,6 @@
 # Web Scraping - Recipe Scrapers
 
-Este projeto contém scrapers para coletar receitas de diversos sites de crochê e tricô.
+Este projeto contém scrapers para coletar receitas de amigurumis de diversos sites de crochê e tricô.
 
 ## Instalação
 
@@ -41,6 +41,7 @@ O scraper do Lovecrafts requer login. Para evitar digitar as credenciais toda ve
 - `mariskavos` - Scraper para mariskavos.nl
 - `alwaysfreeamigurumi` - Scraper para alwaysfreeamigurumi.com
 - `lovecrafts` - Scraper para lovecrafts.com (requer login)
+- `amigurum` - Scraper para amigurum.com
 
 ### Comandos
 
@@ -59,6 +60,9 @@ python main.py <nome_do_scraper> --no-headless
 
 # Limitar número de páginas (apenas mariskavos e alwaysfreeamigurumi)
 python main.py mariskavos --max-pages 10
+
+# Limitar número de scrolls no Amigurum
+python main.py amigurum --max-pages 30
 ```
 
 ### Exemplos
@@ -72,6 +76,9 @@ python main.py lovecrafts
 
 # Scraper do Mariskavos com 20 páginas
 python main.py mariskavos --max-pages 20
+
+# Scraper do Amigurum com 30 scrolls
+python main.py amigurum --max-pages 30
 
 # Forçar re-download de todas as receitas do Lovecrafts
 python main.py lovecrafts --force
@@ -100,6 +107,35 @@ O scraper foi otimizado para reduzir o tempo de processamento:
 - Tempos de espera reduzidos entre ações
 - Tempo estimado: ~10-15 segundos por receita
 
+## Características Especiais do Amigurum Scraper
+
+O scraper do Amigurum possui **condições de parada inteligentes** para evitar loops infinitos:
+
+### Condições de Parada Automáticas
+
+1. **3 páginas consecutivas sem receitas novas**
+   - Para automaticamente quando encontra apenas receitas duplicadas
+   - Evita continuar navegando em conteúdo repetido
+   - Mensagem: `⚠ No new recipes found for 3 consecutive pages`
+
+2. **2 páginas consecutivas totalmente vazias**
+   - Para quando não há mais conteúdo no site
+   - Útil para detectar o fim da paginação
+
+3. **Redirect para homepage**
+   - Detecta quando uma página inexistente redireciona para a página inicial
+   - Para imediatamente ao detectar o redirect
+
+### Como Funciona
+
+O scraper navega pelas páginas numeradas (`/page/2/`, `/page/3/`, etc.) e:
+- ✅ Remove URLs duplicadas automaticamente
+- ✅ Remove âncoras de comentários (`#comment-xxx`)
+- ✅ Mostra progresso detalhado (receitas novas vs total)
+- ✅ Para automaticamente quando não há mais receitas novas
+
+**Resultado:** Coleta eficiente de todas as receitas sem loop infinito ou desperdício de recursos!
+
 ## Estrutura do Projeto
 
 ```
@@ -108,7 +144,8 @@ O scraper foi otimizado para reduzir o tempo de processamento:
 │   ├── circulo_scraper.py
 │   ├── mariskavos_scraper.py
 │   ├── always_free_amigurumi_scraper.py
-│   └── lovecrafts_scraper.py
+│   ├── lovecrafts_scraper.py     # Requer login e baixa PDFs
+│   └── amigurum_scraper.py       # Com condições de parada inteligentes
 ├── db/
 │   ├── resultados/               # CSVs com dados
 │   └── *_urls.txt               # Arquivos com URLs

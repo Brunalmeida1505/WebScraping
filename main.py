@@ -6,6 +6,7 @@ from scrapers.circulo_scraper import CirculoScraper
 from scrapers.mariskavos_scraper import MariskavosScraper
 from scrapers.always_free_amigurumi_scraper import AlwaysFreeAmigurumiScraper
 from scrapers.lovecrafts_scraper import LovecraftsScraper
+from scrapers.amigurum_scraper import AmigurumScraper
 
 # Maps scraper names to their classes
 AVAILABLE_SCRAPERS = {
@@ -13,6 +14,7 @@ AVAILABLE_SCRAPERS = {
     "mariskavos": MariskavosScraper,
     "alwaysfreeamigurumi": AlwaysFreeAmigurumiScraper,
     "lovecrafts": LovecraftsScraper,
+    "amigurum": AmigurumScraper,
 }
 
 def setup_driver(headless: bool = True, scraper_name: str = None) -> webdriver.Chrome:
@@ -78,8 +80,8 @@ def main():
     parser.add_argument(
         '--max-pages',
         type=int,
-        default=50,
-        help='(Mariskavos & AlwaysFreeAmigurumi) Max number of pages to scrape.'
+        default=None,
+        help='(Mariskavos, AlwaysFreeAmigurumi & Amigurum) Max number of pages/scrolls to scrape. If not specified, Amigurum will collect ALL recipes.'
     )
 
     args = parser.parse_args()
