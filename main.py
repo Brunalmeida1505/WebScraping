@@ -7,6 +7,7 @@ from scrapers.mariskavos_scraper import MariskavosScraper
 from scrapers.always_free_amigurumi_scraper import AlwaysFreeAmigurumiScraper
 from scrapers.lovecrafts_scraper import LovecraftsScraper
 from scrapers.amigurum_scraper import AmigurumScraper
+from scrapers.ravelry_scraper import RavelryScraper
 
 # Maps scraper names to their classes
 AVAILABLE_SCRAPERS = {
@@ -15,11 +16,16 @@ AVAILABLE_SCRAPERS = {
     "alwaysfreeamigurumi": AlwaysFreeAmigurumiScraper,
     "lovecrafts": LovecraftsScraper,
     "amigurum": AmigurumScraper,
+    "ravelry": RavelryScraper,
 }
 
 def setup_driver(headless: bool = True, scraper_name: str = None) -> webdriver.Chrome:
     """Configures and initializes the Chrome WebDriver."""
     import os
+    
+    # Ravelry usa API, não precisa de WebDriver
+    if scraper_name == "ravelry":
+        return None
     
     service = Service()
     options = webdriver.ChromeOptions()

@@ -42,6 +42,9 @@ O scraper do Lovecrafts requer login. Para evitar digitar as credenciais toda ve
 - `alwaysfreeamigurumi` - Scraper para alwaysfreeamigurumi.com
 - `lovecrafts` - Scraper para lovecrafts.com (requer login)
 - `amigurum` - Scraper para amigurum.com
+- `ravelry` - Scraper para Ravelry.com via API REST (requer credenciais de API)
+
+📖 **Para obter credenciais do Ravelry, siga o guia completo**: [RAVELRY_CREDENCIAIS.md](RAVELRY_CREDENCIAIS.md)
 
 ### Comandos
 
@@ -58,11 +61,14 @@ python main.py <nome_do_scraper> --update-urls-only
 # Mostrar o navegador (útil para debug)
 python main.py <nome_do_scraper> --no-headless
 
-# Limitar número de páginas (apenas mariskavos e alwaysfreeamigurumi)
+# Limitar número de páginas (apenas mariskavos, alwaysfreeamigurumi e ravelry)
 python main.py mariskavos --max-pages 10
 
 # Limitar número de scrolls no Amigurum
 python main.py amigurum --max-pages 30
+
+# Scraper do Ravelry (via API - muito rápido!)
+python main.py ravelry --max-pages 10
 ```
 
 ### Exemplos
@@ -145,7 +151,8 @@ O scraper navega pelas páginas numeradas (`/page/2/`, `/page/3/`, etc.) e:
 │   ├── mariskavos_scraper.py
 │   ├── always_free_amigurumi_scraper.py
 │   ├── lovecrafts_scraper.py     # Requer login e baixa PDFs
-│   └── amigurum_scraper.py       # Com condições de parada inteligentes
+│   ├── amigurum_scraper.py       # Com condições de parada inteligentes
+│   └── ravelry_scraper.py        # API REST assíncrona com aiohttp
 ├── db/
 │   ├── resultados/               # CSVs com dados
 │   └── *_urls.txt               # Arquivos com URLs
@@ -155,6 +162,59 @@ O scraper navega pelas páginas numeradas (`/page/2/`, `/page/3/`, etc.) e:
 ├── .env.example                  # Template de credenciais
 └── .env                          # Suas credenciais (não commitado)
 ```
+
+## Características Especiais do Ravelry Scraper
+
+O scraper do Ravelry é **diferente dos demais** pois usa a **API REST oficial** em vez de web scraping:
+
+### Estrutura Assíncrona
+
+- ✅ **AsyncRavelryScraper**: Classe interna que gerencia requisições HTTP assíncronas
+- ✅ **aiohttp**: Biblioteca para requisições HTTP assíncronas eficientes
+- ✅ **Context Manager**: Usa `async with` para gerenciar sessões HTTP
+- ✅ **Rate Limiting**: 1 segundo entre requisições (respeita limites da API)
+- ✅ **Concurrent Control**: Máximo de 3 requisições simultâneas
+
+### Diferenças em Relação aos Outros Scrapers
+
+| Característica | Outros Scrapers | Ravelry Scraper |
+|----------------|-----------------|-----------------|
+| Tecnologia | Selenium (navegador) | aiohttp (API REST) |
+| Velocidade | Mais lento | Muito mais rápido |
+| Autenticação | Login via formulário | HTTP Basic Auth |
+| Dados | HTML parsing | JSON estruturado |
+| Estrutura | Síncrona | **Assíncrona (async/await)** |
+
+### Vantagens da API
+
+1. **Mais Rápido**: Requisições HTTP diretas são muito mais rápidas que navegar páginas
+2. **Dados Estruturados**: JSON bem formatado vs parsing de HTML
+3. **Mais Confiável**: API oficial vs scraping que quebra com mudanças no site
+4. **Dados Ricos**: Avaliações, dificuldade, materiais detalhados
+5. **Rate Limits Claros**: 5000 requisições/hora (muito generoso)
+
+### Como Funciona
+
+```python
+# Fluxo assíncrono do scraper
+async with AsyncRavelryScraper(...) as scraper:
+    # 1. Autentica com API
+    await scraper._test_authentication_async()
+    
+    # 2. Busca padrões (async generator)
+    async for pattern in scraper.fetch_patterns(max_pages=10):
+        # 3. Busca detalhes de cada padrão
+        details = await scraper.obter_detalhes_receita(pattern_id)
+        
+        # 4. Rate limiting automático (1s entre requests)
+        await asyncio.sleep(1.0)
+```
+
+### Requisitos Especiais
+
+- **aiohttp**: Adicionado ao `requirements.txt`
+- **Credenciais de API**: Não usa credenciais de login normal
+- **asyncio**: Usa event loop para operações assíncronas
 
 ## Troubleshooting
 
