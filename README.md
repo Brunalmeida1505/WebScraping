@@ -43,8 +43,11 @@ O scraper do Lovecrafts requer login. Para evitar digitar as credenciais toda ve
 - `lovecrafts` - Scraper para lovecrafts.com (requer login)
 - `amigurum` - Scraper para amigurum.com
 - `ravelry` - Scraper para Ravelry.com via API REST (requer credenciais de API)
+- `scribd` - Scraper para Scribd.com (requer conta paga e faz download de PDFs)
 
 📖 **Para obter credenciais do Ravelry, siga o guia completo**: [RAVELRY_CREDENCIAIS.md](RAVELRY_CREDENCIAIS.md)
+
+📖 **Para configurar o Scribd, veja o guia**: [SCRIBD_CREDENCIAIS.md](SCRIBD_CREDENCIAIS.md)
 
 ### Comandos
 
@@ -79,6 +82,12 @@ python main.py circulo
 
 # Scraper do Lovecrafts (com credenciais do .env)
 python main.py lovecrafts
+
+# Scraper do Scribd (com credenciais do .env)
+python main.py scribd
+
+# Scraper do Scribd limitado a 5 documentos
+python main.py scribd --limit 5
 
 # Scraper do Mariskavos com 20 páginas
 python main.py mariskavos --max-pages 20
@@ -152,11 +161,14 @@ O scraper navega pelas páginas numeradas (`/page/2/`, `/page/3/`, etc.) e:
 │   ├── always_free_amigurumi_scraper.py
 │   ├── lovecrafts_scraper.py     # Requer login e baixa PDFs
 │   ├── amigurum_scraper.py       # Com condições de parada inteligentes
-│   └── ravelry_scraper.py        # API REST assíncrona com aiohttp
+│   ├── ravelry_scraper.py        # API REST assíncrona com aiohttp
+│   └── scribd_scraper.py         # Requer conta paga, baixa e converte PDFs para base64
 ├── db/
 │   ├── resultados/               # CSVs com dados
 │   └── *_urls.txt               # Arquivos com URLs
-├── downloads/                    # PDFs do Lovecrafts
+├── downloads/
+│   ├── lovecrafts/               # PDFs do Lovecrafts
+│   └── scribd/                   # PDFs do Scribd
 ├── main.py                       # Entry point
 ├── requirements.txt
 ├── .env.example                  # Template de credenciais
@@ -216,12 +228,62 @@ async with AsyncRavelryScraper(...) as scraper:
 - **Credenciais de API**: Não usa credenciais de login normal
 - **asyncio**: Usa event loop para operações assíncronas
 
+## Características Especiais do Scribd Scraper
+
+O scraper do Scribd é especializado para **download e conversão de PDFs**:
+
+### Funcionalidades Principais
+
+- ✅ **Login Obrigatório**: Usa conta paga para acessar conteúdo completo
+- ✅ **Download de PDFs**: Baixa automaticamente documentos disponíveis
+- ✅ **Conversão Base64**: Converte PDFs para formato base64
+- ✅ **Extração de Metadados**: Título, autor, descrição
+- ✅ **Paginação Inteligente**: Navega por múltiplas páginas de resultados
+- ✅ **Validação de Documentos**: Verifica se documentos são baixáveis
+
+### Estrutura de Dados
+
+O CSV gerado contém:
+- `url` - URL do documento no Scribd
+- `title` - Título do documento
+- `author` - Autor do documento
+- `description` - Descrição/resumo
+- `pdf_downloaded` - True/False indicando sucesso do download
+- `pdf_path` - Caminho local do PDF baixado
+- `base64_content` - Conteúdo do PDF em base64 (para integração com APIs)
+
+### Limitações e Considerações
+
+⚠️ **Importante**:
+- Requer conta paga ativa no Scribd
+- Alguns documentos podem ter restrições mesmo com conta paga
+- Downloads em massa podem acionar medidas de segurança
+- Arquivos CSV podem ficar muito grandes devido ao base64
+- Respeite os Termos de Serviço do Scribd
+
+### Configuração
+
+Adicione suas credenciais no arquivo `.env`:
+```
+SCRIBD_EMAIL=seu_email@exemplo.com
+SCRIBD_PASSWORD=sua_senha
+```
+
+Ou o scraper solicitará suas credenciais durante a execução.
+
 ## Troubleshooting
 
 ### Lovecrafts não faz login
 - Verifique se o arquivo `.env` existe e está preenchido
 - Teste suas credenciais no site manualmente
 - Use `--no-headless` para ver o que está acontecendo
+
+### Scribd não faz login ou não baixa PDFs
+- Verifique se sua conta Scribd está ativa e paga
+- Alguns documentos não permitem download mesmo com conta paga
+- Use `--no-headless` para debug visual
+- Verifique se o diretório `downloads/scribd` foi criado
+- O Scribd pode ter CAPTCHA ou verificação 2FA
 
 ### Downloads muito lentos
 - O scraper já está otimizado

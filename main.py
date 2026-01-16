@@ -8,6 +8,7 @@ from scrapers.always_free_amigurumi_scraper import AlwaysFreeAmigurumiScraper
 from scrapers.lovecrafts_scraper import LovecraftsScraper
 from scrapers.amigurum_scraper import AmigurumScraper
 from scrapers.ravelry_scraper import RavelryScraper
+from scrapers.scribd_scraper import ScribdScraper
 
 # Maps scraper names to their classes
 AVAILABLE_SCRAPERS = {
@@ -17,9 +18,10 @@ AVAILABLE_SCRAPERS = {
     "lovecrafts": LovecraftsScraper,
     "amigurum": AmigurumScraper,
     "ravelry": RavelryScraper,
+    "scribd": ScribdScraper,
 }
 
-def setup_driver(headless: bool = True, scraper_name: str = None) -> webdriver.Chrome:
+def setup_driver(headless: bool = True, scraper_name: str = None, use_profile: bool = False) -> webdriver.Chrome:
     """Configures and initializes the Chrome WebDriver."""
     import os
     
@@ -50,7 +52,45 @@ def setup_driver(headless: bool = True, scraper_name: str = None) -> webdriver.C
             "plugins.always_open_pdf_externally": True
         })
     
+    # Special configuration for Scribd (needs PDF download)
+    if scraper_name == "scribd":
+        download_dir = os.path.join(os.getcwd(), "downloads", "scribd")
+        os.makedirs(download_dir, exist_ok=True)
+        
+        # Option 1: Use real Chrome profile (recommended for Scribd)
+        if use_profile:
+            import getpass
+            username = getpass.getuser()
+            profile_path = f"C:\\Users\\{username}\\AppData\\Local\\Google\\Chrome\\User Data"
+            options.add_argument(f"--user-data-dir={profile_path}")
+            options.add_argument("--profile-directory=Default")
+            print(f"✓ Using Chrome profile from: {profile_path}")
+        else:
+            # Option 2: Stealth mode configuration
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option('useAutomationExtension', False)
+        
+        options.add_argument("--start-maximized")
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        options.add_experimental_option("prefs", {
+            "download.default_directory": download_dir,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "plugins.always_open_pdf_externally": True,
+            "safebrowsing.enabled": False,  # Disabled safe browsing
+            "profile.default_content_setting_values.automatic_downloads": 1,
+        })
+    
     driver = webdriver.Chrome(service=service, options=options)
+    
+    # For Scribd without profile, hide automation flags
+    if scraper_name == "scribd" and not use_profile:
+        driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+            "userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    
     return driver
 
 def main():
@@ -89,6 +129,17 @@ def main():
         default=None,
         help='(Mariskavos, AlwaysFreeAmigurumi & Amigurum) Max number of pages/scrolls to scrape. If not specified, Amigurum will collect ALL recipes.'
     )
+    parser.add_argument(
+        '--limit',
+        type=int,
+        default=None,
+        help='(Scribd, Lovecrafts) Limit the number of documents/recipes to process.'
+    )
+    parser.add_argument(
+        '--use-profile',
+        action='store_true',
+        help='(Scribd) Use your existing Chrome profile (avoids "not secure" warnings).'
+    )
 
     args = parser.parse_args()
     args_dict = vars(args)
@@ -99,7 +150,7 @@ def main():
         scraper_class = AVAILABLE_SCRAPERS[args.scraper]
         
         print(f"Setting up WebDriver for '{scraper_class.__name__}'...")
-        driver = setup_driver(headless=not args.no_headless, scraper_name=args.scraper)
+        driver = setup_driver(headless=not args.no_headless, scraper_name=args.scraper, use_profile=args_dict.get('use_profile', False))
         
         # 2. Instantiate the scraper strategy
         scraper_strategy = scraper_class(driver)
