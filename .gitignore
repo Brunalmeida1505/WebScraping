@@ -9,3 +9,5 @@ dados.csv
 .env
 downloads/
 downloads_test/
+resultados/
+__pycache__/
