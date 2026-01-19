@@ -66,12 +66,18 @@ def setup_driver(headless: bool = True, scraper_name: str = None, use_profile: b
             options.add_argument("--profile-directory=Default")
             print(f"✓ Using Chrome profile from: {profile_path}")
         else:
-            # Option 2: Stealth mode configuration
+            # Option 2: Stealth mode configuration (usar perfil temporário)
+            import tempfile
+            temp_profile = tempfile.mkdtemp()
+            options.add_argument(f"--user-data-dir={temp_profile}")
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
+            print(f"✓ Using temporary profile: {temp_profile}")
         
         options.add_argument("--start-maximized")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
         options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         options.add_experimental_option("prefs", {
             "download.default_directory": download_dir,
@@ -86,10 +92,14 @@ def setup_driver(headless: bool = True, scraper_name: str = None, use_profile: b
     
     # For Scribd without profile, hide automation flags
     if scraper_name == "scribd" and not use_profile:
+        print("✓ Applying anti-detection measures...")
         driver.execute_cdp_cmd('Network.setUserAgentOverride', {
             "userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    
+    if scraper_name == "scribd":
+        print("✓ Chrome initialized successfully for Scribd")
     
     return driver
 

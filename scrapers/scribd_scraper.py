@@ -116,22 +116,62 @@ class ScribdScraper(ScraperStrategy):
             return True
         
         # Go directly to account page for manual login (faster than login page)
-        print(f"Please login manually in the browser...")
+        print(f"\n{'='*60}")
+        print(f"⚠️  OPENING BROWSER - Please wait...")
+        print(f"{'='*60}\n")
         print(f"Opening Scribd homepage...")
+        
         self.driver.get("https://www.scribd.com")
-        time.sleep(1)
+        
+        # Maximize and bring window to front (multiple approaches)
+        try:
+            self.driver.maximize_window()
+            self.driver.switch_to.window(self.driver.current_window_handle)
+            
+            # Try to bring window to front using Windows API (if on Windows)
+            try:
+                import win32gui
+                import win32con
+                # Find Chrome window and bring to front
+                def callback(hwnd, windows):
+                    if win32gui.IsWindowVisible(hwnd):
+                        title = win32gui.GetWindowText(hwnd)
+                        if "Chrome" in title or "Scribd" in title:
+                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                            win32gui.SetForegroundWindow(hwnd)
+                windows = []
+                win32gui.EnumWindows(callback, windows)
+            except ImportError:
+                pass  # pywin32 not installed, skip
+        except Exception as e:
+            print(f"   Warning: Could not maximize window: {e}")
+        
+        time.sleep(2)  # Increased wait time for page load
+        
+        current_url = self.driver.current_url
+        print(f"✓ Page loaded: {current_url}")
         
         self._handle_cookie_banner()
         
         print("\n" + "="*60)
+        print("🌐 BROWSER WINDOW SHOULD BE VISIBLE NOW!")
+        print("="*60)
+        
+        print("\n" + "="*60)
         print("⚠️  MANUAL LOGIN REQUIRED")
         print("="*60)
-        print("1. Click 'Log In' button in the browser")
-        print("2. Enter your credentials and login")
-        print("3. After successful login, press ENTER here to continue...")
+        print("STEPS:")
+        print("1. Look for the Chrome browser window (it should be maximized)")
+        print("2. Click 'Log In' button in the top right corner")
+        print("3. Enter your Scribd credentials:")
+        print(f"   Email: paraspamsomente@gmail.com")
+        print(f"   Password: (your password)")
+        print("4. Complete the login")
+        print("5. After successful login, come back here and press ENTER")
         print("="*60 + "\n")
         
-        input("Press ENTER after you have logged in: ")
+        print("⏳ Waiting for you to complete login in the browser...")
+        input("👉 Press ENTER after you have logged in: ")
         
         # Check if manual login was successful
         if self._check_if_logged_in():
@@ -248,7 +288,7 @@ class ScribdScraper(ScraperStrategy):
         """Attempts to download PDF from a Scribd document URL with two-step process."""
         print(f"\n   Accessing: {url}")
         self.driver.get(url)
-        time.sleep(5)
+        time.sleep(2)  # Reduced from 5s to 2s
         
         try:
             # Get document title for filename BEFORE clicking download
@@ -301,20 +341,20 @@ class ScribdScraper(ScraperStrategy):
             
             # Try to close any overlaying cookie banners before clicking
             self._handle_cookie_banner()
-            time.sleep(0.3)  # Reduced from 0.5s
+            time.sleep(0.2)  # Reduced from 0.3s
             
             print(f"      Step 1: Clicking initial download button...")
             try:
                 # Use JavaScript click directly (faster and more reliable)
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", download_button)
-                time.sleep(0.3)
+                time.sleep(0.2)  # Reduced from 0.3s
                 self.driver.execute_script("arguments[0].click();", download_button)
                 print(f"      ✓ First button clicked!")
             except Exception as e:
                 print(f"      ✗ Error clicking button: {e}")
                 return None
             
-            time.sleep(1.5)  # Reduced from 2s
+            time.sleep(1)  # Reduced from 1.5s
             
             # STEP 2: Look for second/confirmation download button or format selection
             print(f"      Step 2: Looking for confirmation or format selection...")
@@ -350,7 +390,7 @@ class ScribdScraper(ScraperStrategy):
             second_button = None
             for by, selector in second_step_selectors:
                 try:
-                    second_button = WebDriverWait(self.driver, 5).until(
+                    second_button = WebDriverWait(self.driver, 3).until(  # Reduced from 5s
                         EC.element_to_be_clickable((by, selector))
                     )
                     print(f"      Found second step button: {selector}")
@@ -362,18 +402,18 @@ class ScribdScraper(ScraperStrategy):
                 print(f"      Step 2: Clicking confirmation/format button...")
                 # Use JavaScript click directly (faster and more reliable)
                 self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", second_button)
-                time.sleep(0.3)  # Reduced from 0.5s
+                time.sleep(0.2)  # Reduced from 0.3s
                 self.driver.execute_script("arguments[0].click();", second_button)
                 print(f"      ✓ Second button clicked!")
-                time.sleep(2)  # Reduced from 3s - wait for download to start
+                time.sleep(1)  # Reduced from 2s - wait for download to start
             else:
                 print(f"      No second step button found, download may have started already.")
             
             # Wait for download to complete by checking for file in download folder
             print(f"      Waiting for download to complete...")
-            max_wait = 40  # Reduced from 45s
+            max_wait = 25  # Reduced from 40s
             waited = 0
-            check_interval = 0.8  # Reduced from 1s - check every 0.8 seconds
+            check_interval = 0.5  # Reduced from 0.8s - check every 0.5 seconds
             
             # Check for any PDF file downloaded recently
             while waited < max_wait:
@@ -594,13 +634,21 @@ class ScribdScraper(ScraperStrategy):
         print(f"{'='*60}")
         
         results = []
+        batch_size = 50  # Save every 50 documents to avoid losing progress
         for i, url in enumerate(urls_to_process, 1):
             print(f"\n[{i}/{len(urls_to_process)}]")
             details = self.extract_recipe_details(url)
             results.append(details)
-            time.sleep(0.5)  # Reduced from 1s - minimal delay between docs
+            
+            # Save intermediate results every batch_size documents
+            if i % batch_size == 0:
+                print(f"\n💾 Saving intermediate results ({i} documents)...")
+                self._save_results_to_csv(results)
+                print(f"✓ Progress saved!")
+            
+            time.sleep(0.3)  # Reduced from 0.5s - minimal delay between docs
         
-        # Save results
+        # Save final results
         if results:
             self._save_results_to_csv(results)
         
