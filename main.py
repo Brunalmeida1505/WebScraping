@@ -146,6 +146,11 @@ def main():
         help='(Scribd, Lovecrafts) Limit the number of documents/recipes to process.'
     )
     parser.add_argument(
+        '--resume',
+        action='store_true',
+        help='Process only URLs that are not yet present in the results CSV (scribd_dados.csv).'
+    )
+    parser.add_argument(
         '--use-profile',
         action='store_true',
         help='(Scribd) Use your existing Chrome profile (avoids "not secure" warnings).'

@@ -1,0 +1,23 @@
+================================================================================
+                    METADADOS - WEB SCRAPING AMIGURUMI
+================================================================================
+
+📊 ESTATÍSTICAS GERAIS:
+  • Total de receitas: 3221
+  • Receitas completas: 1293 (40.1%)
+  • Número de scrapers: 6
+  • URLs únicas: 3221
+  • Duplicatas: 0
+  • Com PDF: 398
+
+📈 DISTRIBUIÇÃO POR SCRAPER:
+  • Scribd                    → 1267 receitas ( 39.3%)
+  • Circulo                   →  550 receitas ( 17.1%)
+  • Lovecrafts                →  469 receitas ( 14.6%)
+  • Amigurum                  →  438 receitas ( 13.6%)
+  • AlwaysFreeAmigurumi       →  413 receitas ( 12.8%)
+  • Mariskavos                →   84 receitas (  2.6%)
+
+================================================================================
+Data da exportação: 2026-01-21
+================================================================================

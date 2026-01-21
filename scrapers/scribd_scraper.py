@@ -564,20 +564,39 @@ class ScribdScraper(ScraperStrategy):
         # Create DataFrame with all data
         df_full = pd.DataFrame(results)
         
-        # Save full data (including base64) to Parquet
+        # Save full data (including base64) to Parquet (merge with existing if present)
         if 'base64_content' in df_full.columns:
             df_parquet = df_full[['url', 'title', 'pdf_path', 'base64_content']].copy()
             df_parquet = df_parquet[df_parquet['base64_content'].notna()]  # Only rows with base64
             
             if not df_parquet.empty:
-                df_parquet.to_parquet(self.parquet_file_path, index=False, compression='snappy')
-                print(f"✓ Base64 data saved to Parquet: {self.parquet_file_path}")
-                print(f"  Parquet file size: {os.path.getsize(self.parquet_file_path) / (1024*1024):.2f} MB")
+                # If parquet exists, merge to avoid losing previous data
+                try:
+                    if os.path.exists(self.parquet_file_path):
+                        existing = pd.read_parquet(self.parquet_file_path)
+                        combined = pd.concat([existing, df_parquet], ignore_index=True)
+                        combined = combined.drop_duplicates(subset=['url'], keep='first')
+                        combined.to_parquet(self.parquet_file_path, index=False, compression='snappy')
+                    else:
+                        df_parquet.to_parquet(self.parquet_file_path, index=False, compression='snappy')
+                    print(f"✓ Base64 data saved to Parquet: {self.parquet_file_path}")
+                    print(f"  Parquet file size: {os.path.getsize(self.parquet_file_path) / (1024*1024):.2f} MB")
+                except Exception as e:
+                    print(f"   ⚠ Could not merge Parquet file: {e}")
         
-        # Save metadata (without base64) to CSV
+        # Save metadata (without base64) to CSV (merge with existing CSV to keep history)
         df_csv = df_full.drop(columns=['base64_content'], errors='ignore')
-        df_csv.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
-        print(f"✓ Metadata saved to CSV: {self.csv_file_path}")
+        try:
+            if os.path.exists(self.csv_file_path):
+                existing_csv = pd.read_csv(self.csv_file_path, encoding='utf-8-sig')
+                combined_csv = pd.concat([existing_csv, df_csv], ignore_index=True)
+                combined_csv = combined_csv.drop_duplicates(subset=['url'], keep='first')
+                combined_csv.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
+            else:
+                df_csv.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
+            print(f"✓ Metadata saved to CSV: {self.csv_file_path}")
+        except Exception as e:
+            print(f"   ⚠ Could not save/merge CSV metadata: {e}")
 
     def run(self, args: dict):
         """
@@ -620,6 +639,34 @@ class ScribdScraper(ScraperStrategy):
             print(f"\nLoading existing URLs from: {self.url_file_path}")
             urls = self._load_urls_from_file()
             print(f"✓ Loaded {len(urls)} URLs")
+
+        # If resume flag is provided, filter out URLs already present in the CSV results
+        if args.get('resume'):
+            print("\n→ Resume mode: computing remaining URLs (filtering already processed)...")
+            processed = set()
+            try:
+                if os.path.exists(self.csv_file_path):
+                    df = pd.read_csv(self.csv_file_path, encoding='utf-8-sig')
+                    if 'url' in df.columns:
+                        processed = set(df['url'].astype(str).tolist())
+            except Exception as e:
+                print(f"   ⚠ Could not read existing CSV to determine processed URLs: {e}")
+
+            # Read original URLs in original order and filter
+            remaining = []
+            try:
+                with open(self.url_file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        u = line.strip()
+                        if not u:
+                            continue
+                        if u not in processed:
+                            remaining.append(u)
+            except Exception as e:
+                print(f"   ⚠ Could not read URL file for resume: {e}")
+
+            print(f"   ✓ Already processed: {len(processed)} | Remaining: {len(remaining)}")
+            urls = set(remaining)
         
         if not urls:
             print("\n✗ No URLs to process.")
