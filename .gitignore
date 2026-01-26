@@ -1,14 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
 venv/
-.venv
+ENV/
+env/
+
+# IDEs
 .vscode/
 .idea/
-temp/
-urls.txt
-dados.csv
-.log
+*.swp
+*.swo
+
+# Project specific
 .env
 downloads/
 downloads_test/
-resultados/
-__pycache__/
-exports/
+db/resultados/*.csv
+db/resultados/*.parquet
+db/exports/
+db/*.txt
+
+# Logs and temp
+*.log
+temp/
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db

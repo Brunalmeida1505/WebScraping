@@ -58,6 +58,10 @@ class AsyncRavelryScraper:
         """Async generator yielding pattern dicts from search endpoint."""
         assert self._session is not None, "Use 'async with AsyncRavelryScraper(...) as scraper'"
 
+        # Garantir que max_pages não seja None
+        if max_pages is None:
+            max_pages = 1
+
         page = 1
         while page <= max_pages:
             params = {
@@ -191,6 +195,76 @@ class AsyncRavelryScraper:
         except Exception as e:
             return None
 
+    async def buscar_receita_em_pagina_externa(self, page_url: str) -> Optional[str]:
+        """Busca o texto completo da receita em uma página externa."""
+        assert self._session is not None, "Use 'async with AsyncRavelryScraper(...) as scraper'"
+        
+        if not page_url:
+            return None
+        
+        try:
+            # Headers para simular navegador
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+            
+            async with self._session.get(page_url, headers=headers, timeout=30, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None
+                
+                # Ler conteúdo HTML
+                html_content = await resp.text(errors='ignore')
+                
+                # Remover tags HTML e scripts
+                import re
+                
+                # Remover scripts e styles
+                html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+                html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+                
+                # Procurar seções específicas de padrões de crochê
+                patterns_section = [
+                    # Padrões comuns de início de instruções
+                    r'(?:pattern|instructions?|directions?|how to make|abbreviations?)[:\s]*(.{500,}?)(?:related|share|tags|categories|posted|copyright|\Z)',
+                    r'(?:materials?|supplies|you will need)[:\s]*(.{200,}?)(?:pattern|instructions)',
+                    r'(?:round|row|rnd|r)\s*\d+[:\s]*(.{500,}?)(?:related|share|tags|\Z)',
+                    # Seção de artigo/post
+                    r'<article[^>]*>(.*?)</article>',
+                    r'<div[^>]*class="[^"]*(?:post-content|entry-content|pattern|instructions)[^"]*"[^>]*>(.*?)</div>',
+                ]
+                
+                receita_text = ""
+                for pattern in patterns_section:
+                    matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                    if matches:
+                        # Pegar o match mais longo
+                        longest_match = max(matches, key=len) if matches else ""
+                        if len(longest_match) > len(receita_text):
+                            receita_text = longest_match
+                
+                if receita_text:
+                    # Limpar HTML tags remanescentes
+                    receita_text = re.sub(r'<[^>]+>', ' ', receita_text)
+                    # Limpar espaços múltiplos e quebras de linha
+                    receita_text = re.sub(r'\s+', ' ', receita_text)
+                    # Decodificar HTML entities
+                    import html
+                    receita_text = html.unescape(receita_text)
+                    receita_text = receita_text.strip()
+                    
+                    # Validar se parece ser uma receita (contém palavras-chave de crochê)
+                    crochet_keywords = ['crochet', 'stitch', 'chain', 'round', 'row', 'yarn', 'hook', 'sc', 'dc', 'hdc', 'sl st']
+                    keyword_count = sum(1 for kw in crochet_keywords if kw.lower() in receita_text.lower())
+                    
+                    if keyword_count >= 3 and len(receita_text) > 200:
+                        return receita_text[:10000]  # Limitar tamanho
+                
+                return None
+                
+        except Exception as e:
+            return None
+
     async def baixar_pdf_base64(self, pdf_url: str) -> Optional[str]:
         """Baixa um PDF e converte para base64."""
         assert self._session is not None, "Use 'async with AsyncRavelryScraper(...) as scraper'"
@@ -264,6 +338,23 @@ class AsyncRavelryScraper:
                     
                     # Receita (notes/description)
                     receita = pattern.get('notes', pattern.get('pattern_notes', ''))
+                    
+                    # 🔧 CORREÇÃO 2: Detectar padrões sem receita e tentar buscar
+                    # Se não tem receita ou é uma mensagem genérica, buscar na página externa
+                    receita_vazia = not receita or len(receita.strip()) < 50
+                    receita_generica = (
+                        receita and (
+                            'ver padrão completo' in receita.lower() or
+                            'see full pattern' in receita.lower() or
+                            'check video tutorials' in receita.lower() or
+                            'available on' in receita.lower() or
+                            'instagram' in receita.lower() and len(receita) < 150
+                        )
+                    )
+                    
+                    # Se a receita é vazia ou genérica, marcar para busca externa
+                    precisa_buscar_receita = receita_vazia or receita_generica
+                    
                     if not receita:
                         receita = "Ver padrão completo no link"
                     
@@ -323,10 +414,36 @@ class AsyncRavelryScraper:
                             pdf_size_kb = len(pdf_base64) * 3 / 4 / 1024
                             print(f"  ✓ PDF found in external page ({pdf_size_kb:.1f} KB)")
                     
+                    # 🔧 CORREÇÃO 3: Buscar receita completa em página externa se necessário
+                    receita_completa_encontrada = False
+                    if precisa_buscar_receita and external_url:
+                        print(f"  → Pattern has generic text, searching full pattern in external page...")
+                        receita_externa = await self.buscar_receita_em_pagina_externa(external_url)
+                        if receita_externa and len(receita_externa) > 100:
+                            receita = receita_externa
+                            receita_completa_encontrada = True
+                            print(f"  ✓ Full pattern found in external page ({len(receita)} chars)")
+                        else:
+                            print(f"  ⚠ Could not find full pattern in external page")
+                    
+                    # 🔧 CORREÇÃO 2 (continuação): Pular padrões sem receita útil
+                    # Se depois de todas as tentativas ainda não tem receita útil, retornar None
+                    if not receita_completa_encontrada and precisa_buscar_receita:
+                        print(f"  ⊘ Skipping pattern: no useful content found")
+                        return None
+                    
+                    # 🔧 CORREÇÃO 1: Construir URL completa
+                    permalink = pattern.get('permalink', '')
+                    if permalink and not permalink.startswith('http'):
+                        # Converter slug para URL completa
+                        full_url = f"https://www.ravelry.com/patterns/library/{permalink}"
+                    else:
+                        full_url = permalink
+                    
                     return {
                         'id': pattern.get('id'),
                         'nome': pattern.get('name', ''),
-                        'url': pattern.get('permalink', ''),
+                        'url': full_url,  # URL completa
                         'materiais': materiais,
                         'receita': receita,
                         'gratuito': pattern.get('free', False),
@@ -487,7 +604,18 @@ class RavelryScraper(ScraperStrategy):
         
         # Salvar em CSV
         if recipes_data:
+            import csv
             df = pd.DataFrame(recipes_data)
+            
+            # Remover quebras de linha dos campos de texto para evitar problemas no CSV
+            text_columns = ['titulo', 'materiais', 'receita']
+            for col in text_columns:
+                if col in df.columns:
+                    # Substituir \n por espaço e limpar espaços múltiplos
+                    df[col] = df[col].astype(str).str.replace('\n', ' ').str.replace('\r', ' ')
+                    df[col] = df[col].str.replace(r'\s+', ' ', regex=True).str.strip()
+            
+            # Salvar com separador ; e UTF-8-BOM
             df.to_csv(self.csv_file_path, index=False, sep=';', encoding='utf-8-sig')
             print(f"✓ Data saved to {self.csv_file_path} ({len(recipes_data)} recipes)")
         else:
@@ -496,6 +624,7 @@ class RavelryScraper(ScraperStrategy):
     async def _run_async(self, args):
         """Executa a coleta completa de forma assíncrona."""
         recipes_data = []
+        skipped_count = 0  # Contador de padrões pulados
         
         # Criar scraper assíncrono
         if self.credential_type == 'api_key':
@@ -511,11 +640,15 @@ class RavelryScraper(ScraperStrategy):
             
             # Suporta tanto dict quanto Namespace
             if isinstance(args, dict):
-                max_pages = args.get('max_pages', 10)
+                max_pages = args.get('max_pages') or 10
             else:
-                max_pages = getattr(args, 'max_pages', 10) if hasattr(args, 'max_pages') else 10
+                max_pages = getattr(args, 'max_pages', None) or 10
             
             print(f"\n✓ Collecting patterns with details (max {max_pages} pages)...")
+            print("  Improvements enabled:")
+            print("  ✓ Save complete URLs")
+            print("  ✓ Skip patterns without useful content")
+            print("  ✓ Search for full pattern in external pages\n")
             
             count = 0
             async for pattern in scraper.fetch_patterns(max_pages=max_pages, per_page=100):
@@ -539,9 +672,16 @@ class RavelryScraper(ScraperStrategy):
                         count += 1
                         
                         if count % 10 == 0:
-                            print(f"  Processed {count} patterns...")
+                            print(f"  Processed: {count} valid | {skipped_count} skipped")
+                    else:
+                        skipped_count += 1
                     
                     # Rate limiting
                     await asyncio.sleep(1.0)
+            
+            print(f"\n✓ Collection complete:")
+            print(f"  Valid patterns: {count}")
+            print(f"  Skipped patterns: {skipped_count}")
+            print(f"  Total processed: {count + skipped_count}")
         
         return recipes_data

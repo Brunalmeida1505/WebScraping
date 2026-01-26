@@ -12,6 +12,7 @@ import glob
 import os
 import re
 from collections import Counter
+from processar_scribd import processar_scribd
 
 print("=" * 80)
 print(" " * 20 + "ANÁLISES AVANÇADAS - AMIGURUMI")
@@ -30,6 +31,11 @@ for f in arquivos_csv:
     try:
         nome = os.path.basename(f)
         
+        # 🚫 SKIP SCRIBD CSVs - processaremos o Parquet com base64
+        if 'scribd' in nome.lower():
+            print(f"  ⏭️ {nome:30} → Será processado do Parquet")
+            continue
+        
         # Detectar separador automaticamente
         try:
             df_csv = pd.read_csv(f, sep=';', encoding='utf-8-sig', on_bad_lines='skip')
@@ -38,6 +44,7 @@ for f in arquivos_csv:
         except:
             df_csv = pd.read_csv(f, sep=',', encoding='utf-8-sig', on_bad_lines='skip')
         
+        print(f"  ✓ {nome:30} → {len(df_csv):4} receitas")
         dfs.append(df_csv)
         
     except Exception as e:
@@ -47,16 +54,40 @@ for f in arquivos_csv:
 arquivos_parquet = glob.glob(os.path.join(pasta, "*.parquet"))
 for f in arquivos_parquet:
     nome = os.path.basename(f).lower()
-    if 'base64' in nome and 'scribd' in nome:
+    
+    # 🚫 SKIP Scribd Parquet - será processado separadamente
+    if 'scribd' in nome:
+        print(f"  ⏭️ {os.path.basename(f):30} → Será processado do base64")
         continue
     
     try:
         df = pd.read_parquet(f)
         if 'pdf_base64' in df.columns:
             df = df.drop(columns=['pdf_base64'])
+        print(f"  ✓ {os.path.basename(f):30} → {len(df):4} receitas")
         dfs.append(df)
     except Exception as e:
         print(f"  ⚠️ Erro ao ler {nome}: {e}")
+
+# ============================================================================
+# PROCESSAR SCRIBD (Base64 → Texto)
+# ============================================================================
+print("\n🔄 Processando dados do Scribd...")
+try:
+    df_scribd = processar_scribd()
+    if not df_scribd.empty:
+        com_texto = len(df_scribd[df_scribd['num_palavras'] > 50])
+        total_palavras = df_scribd['num_palavras'].sum()
+        
+        print(f"  ✓ scribd_base64.parquet → {len(df_scribd):4} documentos processados")
+        print(f"    • Com texto extraível: {com_texto}/{len(df_scribd)}")
+        print(f"    • Total de palavras: {total_palavras:,}")
+        
+        dfs.append(df_scribd)
+    else:
+        print(f"  ⚠️  Nenhum dado Scribd encontrado")
+except Exception as e:
+    print(f"  ⚠️  Erro ao processar Scribd: {e}")
 
 df = pd.concat(dfs, ignore_index=True)
 print(f"✅ Total: {len(df)} receitas carregadas\n")

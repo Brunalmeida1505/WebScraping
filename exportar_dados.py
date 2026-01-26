@@ -6,6 +6,7 @@ Exporta dataset consolidado em CSV
 import pandas as pd
 import glob
 import os
+from processar_scribd import processar_scribd
 
 print("=" * 80)
 print(" " * 20 + "EXPORTADOR DE DADOS - AMIGURUMI")
@@ -23,6 +24,11 @@ dfs = []
 for f in arquivos_csv:
     try:
         nome = os.path.basename(f)
+        
+        # 🚫 SKIP SCRIBD CSVs - processaremos o Parquet com base64
+        if 'scribd' in nome.lower():
+            print(f"  ⏭️ {nome:30} → Será processado do Parquet")
+            continue
         
         # Detectar separador automaticamente
         try:
@@ -49,8 +55,10 @@ for f in arquivos_csv:
 arquivos_parquet = glob.glob(os.path.join(pasta, "*.parquet"))
 for f in arquivos_parquet:
     nome = os.path.basename(f).lower()
-    if 'base64' in nome and 'scribd' in nome:
-        print(f"  ⊘ {os.path.basename(f):30} → ignorado (base64 puro)")
+    
+    # 🚫 SKIP Scribd Parquet - será processado separadamente
+    if 'scribd' in nome:
+        print(f"  ⏭️ {os.path.basename(f):30} → Será processado do base64")
         continue
     
     try:
@@ -62,8 +70,29 @@ for f in arquivos_parquet:
     except Exception as e:
         print(f"  ⚠️ Erro ao ler {nome}: {e}")
 
+# ============================================================================
+# PROCESSAR SCRIBD (Base64 → Texto)
+# ============================================================================
+print("\n🔄 Processando dados do Scribd...")
+try:
+    df_scribd = processar_scribd()
+    if not df_scribd.empty:
+        # Estatísticas
+        com_texto = len(df_scribd[df_scribd['num_palavras'] > 50])
+        total_palavras = df_scribd['num_palavras'].sum()
+        
+        print(f"  ✓ scribd_base64.parquet → {len(df_scribd):4} documentos processados")
+        print(f"    • Com texto extraível: {com_texto}/{len(df_scribd)}")
+        print(f"    • Total de palavras: {total_palavras:,}")
+        
+        dfs.append(df_scribd)
+    else:
+        print(f"  ⚠️  Nenhum dado Scribd encontrado")
+except Exception as e:
+    print(f"  ⚠️  Erro ao processar Scribd: {e}")
+
 df_completo = pd.concat(dfs, ignore_index=True)
-print(f"✅ Total: {len(df_completo)} receitas carregadas\n")
+print(f"\n✅ Total: {len(df_completo)} receitas carregadas\n")
 
 # ============================================================================
 # CRIAR DIRETÓRIO DE EXPORTAÇÃO

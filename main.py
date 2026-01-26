@@ -165,7 +165,16 @@ def main():
         scraper_class = AVAILABLE_SCRAPERS[args.scraper]
         
         print(f"Setting up WebDriver for '{scraper_class.__name__}'...")
-        driver = setup_driver(headless=not args.no_headless, scraper_name=args.scraper, use_profile=args_dict.get('use_profile', False))
+        
+        # Decide whether to run headless. For Scribd, it's often necessary to show 
+        # the browser (manual login / anti-bot checks).
+        # Open browser in visible mode for Scribd unless user explicitly passed --no-headless
+        headless_flag = not args.no_headless
+        if args.scraper == 'scribd' and headless_flag:
+            print("⚠️  Scribd detected: opening browser in visible mode.")
+            headless_flag = False
+
+        driver = setup_driver(headless=headless_flag, scraper_name=args.scraper, use_profile=args_dict.get('use_profile', False))
         
         # 2. Instantiate the scraper strategy
         scraper_strategy = scraper_class(driver)

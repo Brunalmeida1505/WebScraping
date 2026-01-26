@@ -3,6 +3,7 @@ import time
 import base64
 import getpass
 import pandas as pd
+import requests
 from pathlib import Path
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -59,11 +60,15 @@ class ScribdScraper(ScraperStrategy):
                 element = WebDriverWait(self.driver, 1.5).until(  # Reduced from 3s
                     EC.element_to_be_clickable((by, selector))
                 )
-                element.click()
+                # Use JavaScript click to avoid inspector errors
+                self.driver.execute_script("arguments[0].click();", element)
                 print("✓ Cookie banner closed.")
                 time.sleep(0.5)  # Reduced from 1s
                 return True
             except (TimeoutException, NoSuchElementException):
+                continue
+            except Exception as e:
+                # Silently ignore other errors (like inspector errors)
                 continue
         
         return False
@@ -284,13 +289,82 @@ class ScribdScraper(ScraperStrategy):
         print(f"\n✓ Total URLs collected: {len(all_urls)} from {page-1} pages")
         return all_urls
 
+    def _download_pdf_with_requests(self, download_url: str, title: str) -> str:
+        """Downloads PDF using requests library to avoid antivirus blocking Selenium downloads."""
+        try:
+            # Get cookies from Selenium session
+            selenium_cookies = self.driver.get_cookies()
+            
+            # Convert Selenium cookies to requests format
+            session = requests.Session()
+            for cookie in selenium_cookies:
+                session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain', ''))
+            
+            # Set headers to mimic browser
+            headers = {
+                'User-Agent': self.driver.execute_script("return navigator.userAgent;"),
+                'Referer': self.driver.current_url,
+                'Accept': 'application/pdf,*/*',
+            }
+            
+            print(f"      📥 Downloading via requests (bypassing antivirus)...")
+            
+            # Download PDF
+            response = session.get(download_url, headers=headers, stream=True, timeout=45)
+            
+            if response.status_code == 200:
+                # Save to file
+                filename = f"{title}.pdf"
+                filepath = os.path.join(self.download_dir, filename)
+                
+                # Write in chunks
+                with open(filepath, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                file_size = os.path.getsize(filepath) / (1024 * 1024)  # MB
+                print(f"      ✓ Downloaded via requests: {filename} ({file_size:.2f} MB)")
+                return filepath
+            else:
+                print(f"      ✗ HTTP {response.status_code}: {response.reason}")
+                return None
+                
+        except Exception as e:
+            print(f"      ✗ Error downloading with requests: {e}")
+            return None
+
     def _download_pdf(self, url: str) -> str:
         """Attempts to download PDF from a Scribd document URL with two-step process."""
         print(f"\n   Accessing: {url}")
         self.driver.get(url)
-        time.sleep(2)  # Reduced from 5s to 2s
+        time.sleep(3)  # Garantir carregamento completo
+        
+        # Ativar captura de logs de rede para interceptar download de PDF
+        try:
+            # Enable network logging
+            self.driver.execute_cdp_cmd('Network.enable', {})
+        except:
+            pass
         
         try:
+            # Check for subscription/paywall messages early
+            paywall_indicators = [
+                '//div[contains(text(), "Start your free trial")]',
+                '//div[contains(text(), "Subscribe to read")]',
+                '//div[contains(text(), "Upload to unlock")]',
+                '//button[contains(text(), "Start Free Trial")]',
+            ]
+            
+            for selector in paywall_indicators:
+                try:
+                    paywall = self.driver.find_element(By.XPATH, selector)
+                    if paywall:
+                        print(f"      ⚠️  Paywall detected - document requires subscription")
+                        return None
+                except:
+                    continue
+            
             # Get document title for filename BEFORE clicking download
             try:
                 title_element = self.driver.find_element(By.XPATH, '//h1 | //title')
@@ -309,10 +383,12 @@ class ScribdScraper(ScraperStrategy):
             print(f"      Step 1: Looking for download button...")
             
             download_selectors = [
-                # Scribd-specific button class
+                # Scribd-specific button classes (mais específicos primeiro)
+                (By.XPATH, '//button[@aria-label="Download"]'),
+                (By.XPATH, '//button[@data-e2e="download-button"]'),
                 (By.CLASS_NAME, '_1hU3TU'),
                 (By.XPATH, '//button[contains(@class, "_1hU3TU")]'),
-                # Generic download selectors
+                # Seletores mais genéricos
                 (By.XPATH, '//button[contains(translate(., "DOWNLOAD", "download"), "download")]'),
                 (By.XPATH, '//a[contains(translate(., "DOWNLOAD", "download"), "download")]'),
                 (By.XPATH, '//button[contains(@class, "download")]'),
@@ -327,16 +403,25 @@ class ScribdScraper(ScraperStrategy):
             download_button = None
             for by, selector in download_selectors:
                 try:
-                    download_button = WebDriverWait(self.driver, 3).until(
+                    download_button = WebDriverWait(self.driver, 5).until(  # Aumentado de 3 para 5
                         EC.element_to_be_clickable((by, selector))
                     )
-                    print(f"      Found download button: {selector}")
+                    print(f"      ✓ Found download button: {selector}")
                     break
                 except:
                     continue
             
             if not download_button:
-                print("      ⚠ Download button not found. Document may not be downloadable.")
+                print("      ⚠️  Download button not found.")
+                # Debug: Save page source for analysis
+                try:
+                    page_text = self.driver.find_element(By.TAG_NAME, 'body').text[:500]
+                    if 'premium' in page_text.lower() or 'subscribe' in page_text.lower() or 'trial' in page_text.lower():
+                        print("      ⚠️  Document appears to require subscription")
+                    else:
+                        print(f"      ℹ️  Page preview: {page_text[:200]}...")
+                except:
+                    pass
                 return None
             
             # Try to close any overlaying cookie banners before clicking
@@ -347,7 +432,25 @@ class ScribdScraper(ScraperStrategy):
             try:
                 # Use JavaScript click directly (faster and more reliable)
                 self.driver.execute_script("arguments[0].scrollIntoView(true);", download_button)
-                time.sleep(0.2)  # Reduced from 0.3s
+                time.sleep(0.2)
+                
+                # Try to intercept the download URL before clicking
+                download_url = None
+                try:
+                    # Check if button is a link with href
+                    download_url = download_button.get_attribute('href')
+                    if not download_url:
+                        # Check for data attributes
+                        download_url = download_button.get_attribute('data-url') or download_button.get_attribute('data-href')
+                except:
+                    pass
+                
+                # If we found a direct download URL, use requests instead of Selenium
+                if download_url and ('.pdf' in download_url.lower() or 'download' in download_url.lower()):
+                    print(f"      ✓ Found direct PDF URL, using requests method...")
+                    return self._download_pdf_with_requests(download_url, title)
+                
+                # Otherwise, click normally
                 self.driver.execute_script("arguments[0].click();", download_button)
                 print(f"      ✓ First button clicked!")
             except Exception as e:
@@ -402,57 +505,172 @@ class ScribdScraper(ScraperStrategy):
                 print(f"      Step 2: Clicking confirmation/format button...")
                 # Use JavaScript click directly (faster and more reliable)
                 self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", second_button)
-                time.sleep(0.2)  # Reduced from 0.3s
+                time.sleep(0.2)
+                
+                # Try to intercept download URL from second button too
+                download_url = None
+                try:
+                    download_url = second_button.get_attribute('href') or second_button.get_attribute('data-url')
+                except:
+                    pass
+                
+                # Click the button
                 self.driver.execute_script("arguments[0].click();", second_button)
                 print(f"      ✓ Second button clicked!")
-                time.sleep(1)  # Reduced from 2s - wait for download to start
+                
+                # Wait a bit and try to capture any PDF download request from network logs
+                time.sleep(2)
+                
+                # Try to get download URL from network logs
+                if not download_url:
+                    try:
+                        logs = self.driver.get_log('performance')
+                        for entry in logs:
+                            import json
+                            log = json.loads(entry['message'])['message']
+                            if log.get('method') == 'Network.responseReceived':
+                                response = log.get('params', {}).get('response', {})
+                                response_url = response.get('url', '')
+                                content_type = response.get('mimeType', '')
+                                
+                                # Check if it's a PDF download
+                                if 'application/pdf' in content_type or '.pdf' in response_url.lower():
+                                    download_url = response_url
+                                    print(f"      ✓ Captured PDF URL from network: {response_url[:100]}...")
+                                    break
+                    except Exception as e:
+                        print(f"      ℹ️  Could not capture network logs: {e}")
+                
+                # If we captured a download URL, use requests
+                if download_url and '.pdf' in download_url.lower():
+                    print(f"      ✓ Using requests method to bypass antivirus...")
+                    pdf_path = self._download_pdf_with_requests(download_url, title)
+                    if pdf_path:
+                        return pdf_path
+                    # If requests failed, continue with normal Selenium download
+                
+                time.sleep(2)  # Wait for possible popup to appear
+                
+                # Check for paywall popup after clicking confirmation button
+                try:
+                    # Wait up to 3 seconds for popup to appear
+                    popup = WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((
+                            By.XPATH, 
+                            '//div[@role="dialog" and contains(@class, "modal")]'
+                        ))
+                    )
+                    print(f"      ⚠️  Paywall popup detected! Attempting to bypass...")
+                    
+                    # Try multiple strategies to close/bypass the popup
+                    popup_closed = False
+                    
+                    # Strategy 1: Look for "Continue" or "Download" button in the popup
+                    continue_selectors = [
+                        '//button[contains(text(), "Fazer o download do documento")]',  # Portuguese
+                        '//button[contains(text(), "Download")]',
+                        '//a[contains(text(), "Fazer o download do documento")]',  # Link version
+                        '//a[@data-e2e="modal-download-button"]',  # Data attribute
+                    ]
+                    
+                    for selector in continue_selectors:
+                        try:
+                            continue_button = WebDriverWait(self.driver, 2).until(
+                                EC.element_to_be_clickable((By.XPATH, selector))
+                            )
+                            self.driver.execute_script("arguments[0].click();", continue_button)
+                            print(f"      ✓ Clicked continue button in popup")
+                            popup_closed = True
+                            break
+                        except:
+                            continue
+                    
+                    # Strategy 2: If no continue button, try to close popup with X button
+                    if not popup_closed:
+                        close_selectors = [
+                            '//button[@data-e2e="modal-close"]',
+                            '//button[contains(@class, "close")]',
+                            '//button[@aria-label="Close" or @aria-label="Fechar"]',
+                        ]
+                        
+                        for selector in close_selectors:
+                            try:
+                                close_button = WebDriverWait(self.driver, 2).until(
+                                    EC.element_to_be_clickable((By.XPATH, selector))
+                                )
+                                self.driver.execute_script("arguments[0].click();", close_button)
+                                print(f"      ✓ Closed popup with X button")
+                                popup_closed = True
+                                break
+                            except:
+                                continue
+                    
+                    if popup_closed:
+                        print(f"      ✓ Popup handled successfully")
+                        time.sleep(1)  # Wait after closing popup
+                    else:
+                        print(f"      ⚠️  Could not find button to close popup")
+                        
+                except TimeoutException:
+                    print(f"      ✓ No popup detected, proceeding with download")
+                except Exception as e:
+                    print(f"      ⚠️  Error handling popup: {str(e)}")
+                    
             else:
                 print(f"      No second step button found, download may have started already.")
             
             # Wait for download to complete by checking for file in download folder
             print(f"      Waiting for download to complete...")
-            max_wait = 25  # Reduced from 40s
+            max_wait = 40  # Aumentado de 25 para 40 segundos
             waited = 0
-            check_interval = 0.5  # Reduced from 0.8s - check every 0.5 seconds
+            check_interval = 0.5  # Check every 0.5 seconds
             
-            # Check for any PDF file downloaded recently
+            # COUNT EXISTING PDFs BEFORE download to detect NEW files
+            initial_files = set(os.listdir(self.download_dir))
+            initial_pdf_count = len([f for f in initial_files if f.endswith('.pdf')])
+            print(f"      Initial PDF count: {initial_pdf_count}")
+            
+            # Check for any NEW PDF file downloaded
             while waited < max_wait:
                 try:
                     # List all files in download directory
                     files = os.listdir(self.download_dir)
                     pdf_files = [f for f in files if f.endswith('.pdf')]
                     
-                    if pdf_files:
-                        # Get the most recent PDF file
-                        pdf_files_with_time = [(f, os.path.getmtime(os.path.join(self.download_dir, f))) for f in pdf_files]
-                        pdf_files_with_time.sort(key=lambda x: x[1], reverse=True)
-                        newest_pdf = pdf_files_with_time[0][0]
-                        newest_path = os.path.join(self.download_dir, newest_pdf)
+                    # Check if file is still being downloaded (ends with .crdownload or .tmp)
+                    temp_files = [f for f in files if f.endswith('.crdownload') or f.endswith('.tmp')]
+                    if temp_files:
+                        if waited % 5 == 0:  # Print every 5 seconds
+                            print(f"      ⏳ Download in progress... ({waited}s)")
+                        time.sleep(check_interval)
+                        waited += check_interval
+                        continue
+                    
+                    # Check if a NEW PDF appeared (count increased)
+                    current_pdf_count = len(pdf_files)
+                    if current_pdf_count > initial_pdf_count:
+                        # Find the NEW file (not in initial set)
+                        new_files = set(files) - initial_files
+                        new_pdfs = [f for f in new_files if f.endswith('.pdf')]
                         
-                        # Check if file is still being downloaded (ends with .crdownload or .tmp)
-                        temp_files = [f for f in files if f.endswith('.crdownload') or f.endswith('.tmp')]
-                        if temp_files:
-                            if waited % 5 == 0:  # Print every 5 seconds
-                                print(f"      ⏳ Download in progress... ({waited}s)")
-                            time.sleep(check_interval)
-                            waited += check_interval
-                            continue
+                        if new_pdfs:
+                            newest_pdf = new_pdfs[0]  # Get the new PDF
+                            newest_path = os.path.join(self.download_dir, newest_pdf)
+                            print(f"      ✓ NEW PDF downloaded: {newest_pdf}")
+                            
+                            # Optionally rename to clean title
+                            if newest_pdf != f"{title}.pdf":
+                                try:
+                                    new_path = os.path.join(self.download_dir, f"{title}.pdf")
+                                    if not os.path.exists(new_path):
+                                        os.rename(newest_path, new_path)
+                                        print(f"      ✓ Renamed to: {title}.pdf")
+                                        return new_path
+                                except:
+                                    pass
+                            
+                            return newest_path
                         
-                        # File exists and is complete
-                        print(f"      ✓ PDF downloaded: {newest_pdf}")
-                        
-                        # Optionally rename to clean title
-                        if newest_pdf != f"{title}.pdf":
-                            try:
-                                new_path = os.path.join(self.download_dir, f"{title}.pdf")
-                                if not os.path.exists(new_path):
-                                    os.rename(newest_path, new_path)
-                                    print(f"      ✓ Renamed to: {title}.pdf")
-                                    return new_path
-                            except:
-                                pass
-                        
-                        return newest_path
                 except Exception as e:
                     print(f"      Error checking downloads: {e}")
                 
@@ -613,6 +831,14 @@ class ScribdScraper(ScraperStrategy):
         print(f"Starting {self.name} Scraper")
         print(f"{'='*60}")
         
+        # Debug: verificar se driver existe
+        if not self.driver:
+            print("❌ ERRO: Driver não foi inicializado!")
+            return
+        
+        print(f"✓ Driver inicializado: {type(self.driver)}")
+        print(f"✓ Args recebidos: {args}")
+        
         self._setup_download_dir()
         
         # Get credentials
@@ -631,12 +857,18 @@ class ScribdScraper(ScraperStrategy):
         
         # Collect URLs
         force = args.get('force', False)
-        if force or not os.path.exists(self.url_file_path):
+        if force:
+            print(f"\n🔄 Force mode: Collecting fresh URLs...")
+            urls = self.collect_recipe_urls()
+            if urls:
+                self._save_urls_to_file(urls)
+        elif not os.path.exists(self.url_file_path):
+            print(f"\n📥 No URL file found. Collecting URLs...")
             urls = self.collect_recipe_urls()
             if urls:
                 self._save_urls_to_file(urls)
         else:
-            print(f"\nLoading existing URLs from: {self.url_file_path}")
+            print(f"\n📂 Loading existing URLs from: {self.url_file_path}")
             urls = self._load_urls_from_file()
             print(f"✓ Loaded {len(urls)} URLs")
 

@@ -45,10 +45,6 @@ O scraper do Lovecrafts requer login. Para evitar digitar as credenciais toda ve
 - `ravelry` - Scraper para Ravelry.com via API REST (requer credenciais de API)
 - `scribd` - Scraper para Scribd.com (requer conta paga e faz download de PDFs)
 
-📖 **Para obter credenciais do Ravelry, siga o guia completo**: [RAVELRY_CREDENCIAIS.md](RAVELRY_CREDENCIAIS.md)
-
-📖 **Para configurar o Scribd, veja o guia**: [SCRIBD_CREDENCIAIS.md](SCRIBD_CREDENCIAIS.md)
-
 ### Comandos
 
 ```bash
@@ -104,6 +100,8 @@ python main.py lovecrafts --force
 Os dados são salvos em:
 - **URLs**: `db/<scraper>_urls.txt`
 - **Dados**: `db/resultados/<scraper>_dados.csv`
+- **PDFs Scribd**: `db/resultados/scribd_base64.parquet` (PDFs em base64)
+- **Exports**: `db/exports/` (dados consolidados e análises)
 
 ### Formato CSV
 
@@ -113,6 +111,19 @@ Todos os scrapers salvam dados no formato:
 - `materiais` - Materiais necessários / Abreviações
 - `receita` - Instruções da receita
 - `origem` - Nome do site de origem
+
+### Scribd - Processamento Automático de PDFs
+
+⚠️ **Nota**: O Scribd armazena receitas em PDFs que são automaticamente processados pelos scripts `exportar_dados.py` e `analises_avancadas.py`.
+
+O módulo `processar_scribd.py`:
+- ✅ Lê PDFs do arquivo `scribd_base64.parquet`
+- ✅ Extrai texto usando PyPDF2 (~0.2s por PDF)
+- ✅ Detecta idioma automaticamente (Espanhol/Inglês/Português)
+- ✅ Filtra PDFs sem texto extraível (imagens)
+- ✅ Integração automática nas análises
+
+**Resultado**: Scribd totalmente integrado nos exports e análises!
 
 ## Otimizações do Lovecrafts Scraper
 
@@ -164,15 +175,65 @@ O scraper navega pelas páginas numeradas (`/page/2/`, `/page/3/`, etc.) e:
 │   ├── ravelry_scraper.py        # API REST assíncrona com aiohttp
 │   └── scribd_scraper.py         # Requer conta paga, baixa e converte PDFs para base64
 ├── db/
-│   ├── resultados/               # CSVs com dados
+│   ├── resultados/               # CSVs com dados e Parquet
+│   ├── exports/                  # Dados consolidados e análises
 │   └── *_urls.txt               # Arquivos com URLs
 ├── downloads/
 │   ├── lovecrafts/               # PDFs do Lovecrafts
 │   └── scribd/                   # PDFs do Scribd
-├── main.py                       # Entry point
+├── main.py                       # Entry point para scrapers
+├── processar_scribd.py           # Módulo para processar PDFs do Scribd
+├── exportar_dados.py             # Exporta dados consolidados
+├── analises_avancadas.py         # Análises avançadas (complexidade, materiais, etc)
 ├── requirements.txt
 ├── .env.example                  # Template de credenciais
 └── .env                          # Suas credenciais (não commitado)
+```
+
+## Scripts de Análise e Exportação
+
+### Exportar Dados Consolidados
+
+```bash
+python exportar_dados.py
+```
+
+Este script gera 2 arquivos na pasta `db/exports/`:
+1. **amigurumi_completo.csv** - Todos os dados (2.051 receitas incluindo 3 Scribd, ~1.7 GB)
+2. **amigurumi_receitas_completas.csv** - Apenas receitas com materiais e instruções completas (~1.387 receitas)
+
+### Análises Avançadas
+
+```bash
+python analises_avancadas.py
+```
+
+Gera análises detalhadas:
+- ✅ **Análise de Complexidade por Scraper** - Ranking baseado em tamanho e variação de texto
+- ✅ **Análise de Materiais** - Materiais mais comuns (fio, agulhas, enchimento)
+- ✅ **Distribuição de Tamanho de Receitas** - Curta/Média/Longa
+- ✅ **Clustering** - Agrupamento de receitas similares
+- ✅ **Word Cloud** - Termos mais frequentes
+
+**Resultado das Análises (Janeiro 2026)**:
+```
+Total de receitas: 2,051
+Total analisadas: 2,051 (100%)
+
+Ranking de Complexidade:
+1º AlwaysFreeAmigurumi - 113.4 (Alta)
+2º Scribd - 108.0 (Alta)
+3º Lovecrafts - 99.0 (Alta)
+4º Amigurum - 40.6 (Alta)
+5º Mariskavos - 38.2 (Alta)
+6º Circulo - 8.7 (Baixa - Iniciantes)
+7º Ravelry - API REST
+
+Materiais Mais Comuns:
+- pattern: 892 receitas
+- amigurumi: 890 receitas
+- free: 679 receitas
+- crochet: 610 receitas
 ```
 
 ## Características Especiais do Ravelry Scraper
@@ -250,7 +311,12 @@ O CSV gerado contém:
 - `description` - Descrição/resumo
 - `pdf_downloaded` - True/False indicando sucesso do download
 - `pdf_path` - Caminho local do PDF baixado
-- `base64_content` - Conteúdo do PDF em base64 (para integração com APIs)
+
+Os PDFs são armazenados em:
+- **Base64**: `db/resultados/scribd_base64.parquet` (para backup e processamento)
+- **Arquivos**: `downloads/scribd/` (PDFs originais)
+
+⚠️ **Importante**: Use `processar_scribd.py` (já integrado em `exportar_dados.py` e `analises_avancadas.py`) para processar PDFs do Scribd automaticamente.
 
 ### Limitações e Considerações
 
