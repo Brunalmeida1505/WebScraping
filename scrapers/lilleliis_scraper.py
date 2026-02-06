@@ -1,6 +1,8 @@
 import os
 import time
 import pandas as pd
+import requests
+from urllib.parse import urlparse
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -19,6 +21,8 @@ class LillelisScraper(ScraperStrategy):
         self.db_dir = 'db'
         self.url_file_path = os.path.join(self.db_dir, 'lilleliis_urls.txt')
         self.csv_file_path = os.path.join(self.db_dir, 'resultados', 'lilleliis_dados.csv')
+        self.images_dir = os.path.join('downloads', 'images', 'lilleliis_images')
+        os.makedirs(self.images_dir, exist_ok=True)
 
     def get_name(self) -> str:
         return self.name
@@ -37,6 +41,81 @@ class LillelisScraper(ScraperStrategy):
             return set()
         with open(self.url_file_path, 'r', encoding='utf-8') as f:
             return set(line.strip() for line in f if line.strip())
+
+    def _download_image(self, image_url: str, pattern_slug: str) -> str:
+        """Downloads an image and saves it locally with retry logic."""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                if not image_url or not image_url.startswith('http'):
+                    return "N/A"
+                
+                parsed_url = urlparse(image_url)
+                file_extension = os.path.splitext(parsed_url.path)[1] or '.jpg'
+                file_extension = file_extension.split('?')[0] if '?' in file_extension else file_extension
+                file_extension = file_extension if file_extension else '.jpg'
+                    
+                filename = f"{pattern_slug}{file_extension}"
+                filepath = os.path.join(self.images_dir, filename)
+                
+                if os.path.exists(filepath):
+                    file_size = os.path.getsize(filepath)
+                    if file_size > 1000:
+                        print(f"      Image already exists: {filename}")
+                        return filepath
+                    else:
+                        os.remove(filepath)
+                        print(f"      Corrupted image found, re-downloading...")
+                
+                print(f"      Downloading image (attempt {attempt + 1}/{max_retries})...")
+                response = requests.get(
+                    image_url, 
+                    timeout=15,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Referer': 'https://www.lilleliis.com/'
+                    },
+                    stream=True
+                )
+                
+                if response.status_code == 200:
+                    with open(filepath, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+                        print(f"      ✓ Downloaded image: {filename} ({os.path.getsize(filepath)} bytes)")
+                        return filepath
+                    else:
+                        print(f"      ⚠ Downloaded file too small, retrying...")
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                        if attempt < max_retries - 1:
+                            time.sleep(2)
+                            continue
+                else:
+                    print(f"      Failed to download image: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    return "N/A"
+                    
+            except requests.exceptions.Timeout:
+                print(f"      ⚠ Download timeout (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return "N/A"
+            except Exception as e:
+                print(f"      Error downloading image: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return "N/A"
+        
+        return "N/A"
 
     def collect_recipe_urls(self) -> set:
         """Collects all recipe URLs from the freebies page."""
@@ -130,9 +209,18 @@ class LillelisScraper(ScraperStrategy):
         
         try:
             self.driver.get(url)
-            time.sleep(2)  # Wait for page load
+            time.sleep(2)
             
-            # Extract title
+            # Scroll to trigger lazy loading
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
+            time.sleep(1)
+            self.driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(1)
+            
+            # Extract pattern slug from URL for image filename
+            pattern_slug = url.rstrip('/').split('/')[-1]
+            
+            # Extract title first (needed for image matching)
             titulo = "N/A"
             try:
                 title_selectors = [
@@ -151,6 +239,167 @@ class LillelisScraper(ScraperStrategy):
                         continue
             except:
                 pass
+            
+            # Image extraction with keyword matching
+            imagem_url = "N/A"
+            imagem_local = "N/A"
+            
+            print(f"   Searching for images for: {titulo}")
+            
+            # Extract keywords from title
+            stop_words = ['pattern', 'free', 'crochet', 'amigurumi', 'the', 'a', 'an', 'and', 'or', 'for', 'with', 'tutorial']
+            title_words = [w.lower() for w in titulo.split() if w.lower() not in stop_words and len(w) > 3]
+            print(f"   Keywords from title: {title_words[:5]}")
+            
+            try:
+                all_imgs = self.driver.find_elements(By.TAG_NAME, 'img')
+                print(f"   Found {len(all_imgs)} total images")
+                
+                candidates = []
+                
+                for img in all_imgs:
+                    try:
+                        # Get src from different possible attributes (priority order)
+                        src = (img.get_attribute('data-lazy-src') or 
+                               img.get_attribute('data-src') or 
+                               img.get_attribute('data-srcset') or
+                               img.get_attribute('src'))
+                        
+                        # Skip placeholder images
+                        if not src or src.startswith('data:'):
+                            continue
+                        
+                        # Handle srcset - get the largest image
+                        if ' ' in src:
+                            src = src.split(' ')[0].split(',')[-1]
+                        
+                        # Handle relative URLs
+                        if src.startswith('//'):
+                            src = 'https:' + src
+                        elif src.startswith('/'):
+                            src = 'https://www.lilleliis.com' + src
+                        
+                        # Skip common non-pattern images
+                        skip_keywords = ['cookieyes', 'cookie-', 'favicon', 'icon-', 'avatar', 'button', 'badge', 'banner-', 'social-', 'pixel', 'tracking']
+                        src_lower = src.lower()
+                        img_class_lower = (img.get_attribute('class') or '').lower()
+                        
+                        # Filter logos by class
+                        if 'logo' in img_class_lower or 'header-logo' in img_class_lower:
+                            if debug_count <= 3:
+                                print(f"      → Skipped: logo class found")
+                            continue
+                        
+                        if any(keyword in src_lower for keyword in skip_keywords):
+                            if debug_count <= 3:
+                                print(f"      → Skipped: skip keyword found")
+                            continue
+                        
+                        # Get image dimensions - try to trigger lazy load first
+                        try:
+                            # Scroll to image to trigger lazy loading
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", img)
+                            time.sleep(0.3)
+                            
+                            # Wait for image to load
+                            width = self.driver.execute_script("""
+                                var img = arguments[0];
+                                if (img.complete && img.naturalWidth > 0) {
+                                    return img.naturalWidth;
+                                }
+                                return img.width || 0;
+                            """, img)
+                            
+                            height = self.driver.execute_script("""
+                                var img = arguments[0];
+                                if (img.complete && img.naturalHeight > 0) {
+                                    return img.naturalHeight;
+                                }
+                                return img.height || 0;
+                            """, img)
+                            
+                            # If dimensions are still 0, try to get from attributes
+                            if (not width or not height):
+                                width = int(img.get_attribute('width') or 0)
+                                height = int(img.get_attribute('height') or 0)
+                            
+                            # Skip very small images (thumbnails, icons)
+                            if not width or not height or width < 80 or height < 80:
+                                if debug_count <= 3:
+                                    print(f"      → Skipped: dimensions {width}x{height} too small")
+                                continue
+                            
+                            if debug_count <= 3:
+                                print(f"      → Valid candidate: {width}x{height}, area={width*height}")
+                            
+                            area = width * height
+                        except:
+                            continue
+                        
+                        # Get image attributes for matching
+                        img_title = (img.get_attribute('title') or '').lower()
+                        img_alt = (img.get_attribute('alt') or '').lower()
+                        img_class = (img.get_attribute('class') or '').lower()
+                        
+                        # Calculate match score
+                        match_score = 0
+                        for word in title_words:
+                            if word in img_title:
+                                match_score += 5
+                            if word in img_alt:
+                                match_score += 5
+                            if word in src.lower():
+                                match_score += 2
+                        
+                        # Check parent context
+                        try:
+                            parent_class = img.find_element(By.XPATH, './..').get_attribute('class') or ''
+                            if 'entry-content' in parent_class or 'post-content' in parent_class or 'article' in parent_class:
+                                match_score += 3
+                        except:
+                            pass
+                        
+                        # Bonus for specific classes
+                        if 'featured' in img_class or 'main' in img_class or 'pattern' in img_class:
+                            match_score += 2
+                        
+                        candidates.append({
+                            'src': src,
+                            'area': area,
+                            'match_score': match_score,
+                            'width': width,
+                            'height': height,
+                            'title': img_title,
+                            'alt': img_alt
+                        })
+                    except:
+                        continue
+                
+                # Sort by match score first, then by area
+                candidates.sort(key=lambda x: (x['match_score'], x['area']), reverse=True)
+                
+                print(f"   Found {len(candidates)} valid image candidates")
+                if candidates:
+                    print(f"   Top candidate: {candidates[0]['width']}x{candidates[0]['height']}, match_score={candidates[0]['match_score']}")
+                
+                # Try top 15 candidates
+                for i, candidate in enumerate(candidates[:15]):
+                    # Skip small images unless they have good match score
+                    if candidate['area'] < 5000 and candidate['match_score'] < 3:
+                        continue
+                    
+                    print(f"   Trying candidate {i+1}: {candidate['width']}x{candidate['height']}, score={candidate['match_score']}")
+                    
+                    imagem_url = candidate['src']
+                    imagem_local = self._download_image(imagem_url, pattern_slug)
+                    
+                    if imagem_local != "N/A":
+                        break
+                
+                if imagem_local == "N/A":
+                    print("   ⚠ Could not download any suitable image")
+            except Exception as e:
+                print(f"   Error extracting images: {e}")
             
             # Extract content (materiais + receita)
             materiais = "N/A"
@@ -236,6 +485,8 @@ class LillelisScraper(ScraperStrategy):
             return {
                 'titulo': titulo,
                 'url': url,
+                'imagem_url': imagem_url,
+                'imagem_local': imagem_local,
                 'materiais': materiais,
                 'receita': receita,
                 'origem': 'Lilleliis'
@@ -246,6 +497,8 @@ class LillelisScraper(ScraperStrategy):
             return {
                 'titulo': "ERROR",
                 'url': url,
+                'imagem_url': "ERROR",
+                'imagem_local': "ERROR",
                 'materiais': "ERROR",
                 'receita': str(e),
                 'origem': 'Lilleliis'
@@ -257,7 +510,12 @@ class LillelisScraper(ScraperStrategy):
         os.makedirs(results_dir, exist_ok=True)
         
         df = pd.DataFrame(results)
-        df.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
+        
+        # Reorder columns to match standard format
+        columns_order = ['titulo', 'url', 'imagem_url', 'imagem_local', 'materiais', 'receita', 'origem']
+        df = df[columns_order]
+        
+        df.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig', sep=';')
         print(f"✓ Results saved to: {self.csv_file_path}")
 
     def run(self, args: dict):
