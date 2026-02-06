@@ -1,6 +1,8 @@
 import os
 import time
 import pandas as pd
+import requests
+from urllib.parse import urlparse
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -19,6 +21,8 @@ class AmigurumScraper(ScraperStrategy):
         self.db_dir = "db"
         self.url_file_path = os.path.join(self.db_dir, "amigurum_urls.txt")
         self.csv_file_path = os.path.join(self.db_dir, "resultados", "amigurum_dados.csv")
+        self.images_dir = os.path.join('downloads', 'images', 'amigurum_images')
+        os.makedirs(self.images_dir, exist_ok=True)
 
     def get_name(self) -> str:
         return self.name
@@ -27,83 +31,57 @@ class AmigurumScraper(ScraperStrategy):
         """Collects recipe URLs by navigating through numbered pages."""
         print(f"Starting URL collection for {self.name}...")
         recipe_urls = set()
-
         page_num = 1
         consecutive_empty_pages = 0
         consecutive_no_new_recipes = 0
-        max_consecutive_no_new = 3  # Stop after 3 pages with no new recipes
+        max_consecutive_no_new = 3
         
         while True:
             if max_pages and page_num > max_pages:
                 print(f"   Reached maximum page limit ({max_pages})")
                 break
             
-            # Build URL for current page
-            if page_num == 1:
-                page_url = self.base_url
-            else:
-                page_url = f"{self.base_url}/page/{page_num}/"
-            
+            page_url = self.base_url if page_num == 1 else f"{self.base_url}/page/{page_num}/"
             print(f"   Accessing page {page_num}: {page_url}")
             
             try:
                 self.driver.get(page_url)
                 time.sleep(2)
                 
-                # Handle cookie consent on first page
                 if page_num == 1:
                     try:
-                        cookie_selectors = [
-                            (By.XPATH, '//button[contains(text(), "Accept")]'),
-                            (By.XPATH, '//button[contains(text(), "Aceitar")]'),
-                            (By.ID, "cookie-accept"),
-                        ]
-                        for by, selector in cookie_selectors:
-                            try:
-                                cookie_btn = WebDriverWait(self.driver, 3).until(
-                                    EC.element_to_be_clickable((by, selector))
-                                )
-                                cookie_btn.click()
-                                print("   Cookie consent accepted.")
-                                time.sleep(1)
-                                break
-                            except:
-                                continue
+                        cookie_btn = WebDriverWait(self.driver, 3).until(
+                            EC.element_to_be_clickable((By.XPATH, '//button[contains(text(), "Accept") or contains(text(), "Aceitar")]'))
+                        )
+                        cookie_btn.click()
+                        print("   Cookie consent accepted.")
+                        time.sleep(1)
                     except:
                         pass
                 
-                # Check if page exists (404 or redirect to homepage)
                 current_url = self.driver.current_url
-                if page_num > 1 and (current_url == self.base_url or current_url == f"{self.base_url}/"):
+                if page_num > 1 and current_url.rstrip('/') == self.base_url.rstrip('/'):
                     print(f"   Page {page_num} redirected to home. Reached end of pagination.")
                     break
                 
-                # Collect recipe links from current page
-                links = self.driver.find_elements(
-                    By.XPATH, 
-                    "//a[contains(@href, '/20') and contains(@href, '.html')]"
-                )
+                links = self.driver.find_elements(By.XPATH, "//a[contains(@href, '/20') and contains(@href, '.html')]")
                 
                 page_recipes = set()
                 for link in links:
                     href = link.get_attribute("href")
                     if href and href.startswith(self.base_url) and '.html' in href:
-                        # Remove comment anchors (#comment-xxx)
-                        if '#' in href:
-                            href = href.split('#')[0]
+                        href = href.split('#')[0] if '#' in href else href
                         page_recipes.add(href)
                 
-                # Check if we found new recipes
                 if page_recipes:
                     new_recipes = page_recipes - recipe_urls
+                    recipe_urls.update(page_recipes)
                     
                     if new_recipes:
-                        recipe_urls.update(page_recipes)
                         print(f"   Page {page_num}: Found {len(page_recipes)} recipes ({len(new_recipes)} new) | Total: {len(recipe_urls)}")
                         consecutive_empty_pages = 0
                         consecutive_no_new_recipes = 0
                     else:
-                        recipe_urls.update(page_recipes)
                         consecutive_no_new_recipes += 1
                         print(f"   Page {page_num}: Found {len(page_recipes)} recipes (0 new - all duplicates) | Total: {len(recipe_urls)}")
                         
@@ -131,15 +109,101 @@ class AmigurumScraper(ScraperStrategy):
         print(f"\n✓ URL collection finished: {len(recipe_urls)} recipes found across {page_num - 1} pages.")
         return recipe_urls
 
+    def _download_image(self, image_url: str, pattern_slug: str) -> str:
+        """Downloads an image and saves it locally with retry logic."""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                if not image_url or not image_url.startswith('http'):
+                    return "N/A"
+                
+                parsed_url = urlparse(image_url)
+                file_extension = os.path.splitext(parsed_url.path)[1] or '.jpg'
+                file_extension = file_extension.split('?')[0] if '?' in file_extension else file_extension
+                file_extension = file_extension if file_extension else '.jpg'
+                    
+                filename = f"{pattern_slug}{file_extension}"
+                filepath = os.path.join(self.images_dir, filename)
+                
+                if os.path.exists(filepath):
+                    file_size = os.path.getsize(filepath)
+                    if file_size > 1000:
+                        print(f"      Image already exists: {filename}")
+                        return filepath
+                    else:
+                        os.remove(filepath)
+                        print(f"      Corrupted image found, re-downloading...")
+                
+                print(f"      Downloading image (attempt {attempt + 1}/{max_retries})...")
+                response = requests.get(
+                    image_url, 
+                    timeout=15,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Referer': 'https://amigurum.com/'
+                    },
+                    stream=True
+                )
+                
+                if response.status_code == 200:
+                    with open(filepath, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+                        print(f"      ✓ Downloaded image: {filename} ({os.path.getsize(filepath)} bytes)")
+                        return filepath
+                    else:
+                        print(f"      ⚠ Downloaded file too small, retrying...")
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                        if attempt < max_retries - 1:
+                            time.sleep(2)
+                            continue
+                else:
+                    print(f"      Failed to download image: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    return "N/A"
+                    
+            except requests.exceptions.Timeout:
+                print(f"      ⚠ Download timeout (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return "N/A"
+            except Exception as e:
+                print(f"      Error downloading image: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return "N/A"
+        
+        return "N/A"
+
     def extract_recipe_details(self, url: str) -> dict:
         """Extracts details from a single recipe page."""
         print(f"   Processing: {url}")
         self.driver.get(url)
-        time.sleep(2)
+        time.sleep(3)  # Increased wait time
+        
+        # Scroll to load lazy-loaded images
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
+        time.sleep(1)
+        self.driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+        
+        # Extract slug from URL for image naming
+        pattern_slug = url.rstrip('/').split('/')[-1].replace('.html', '')
 
         recipe_data = {
             'titulo': '',
             'url': url,
+            'imagem_url': 'N/A',
+            'imagem_local': 'N/A',
             'materiais': '',
             'receita': '',
             'origem': self.name
@@ -154,10 +218,129 @@ class AmigurumScraper(ScraperStrategy):
                 recipe_data['titulo'] = title_element.text.strip()
             except TimeoutException:
                 recipe_data['titulo'] = "Título não encontrado"
+            
+            # Extract main image with title/alt validation
+            try:
+                print("   Extracting main image...")
+                time.sleep(2)
+                
+                recipe_title = recipe_data['titulo'].lower()
+                stop_words = ['pattern', 'free', 'crochet', 'amigurumi', 'the', 'a', 'an', 'and', 'or', 'for']
+                title_words = [w for w in recipe_title.split() if w not in stop_words and len(w) > 3]
+                
+                print(f"      Looking for image matching title: {recipe_data['titulo']}")
+                print(f"      Key words: {', '.join(title_words[:5])}")
+                
+                all_images = []
+                imgs = self.driver.find_elements(By.TAG_NAME, 'img')
+                
+                for img in imgs:
+                    try:
+                        src = img.get_attribute('src') or img.get_attribute('data-src') or img.get_attribute('data-lazy-src')
+                        if not src:
+                            continue
+                        
+                        if not src.startswith('http'):
+                            if src.startswith('//'):
+                                src = 'https:' + src
+                            elif src.startswith('/'):
+                                src = self.base_url + src
+                            else:
+                                continue
+                        
+                        skip_keywords = ['logo', 'icon', 'avatar', 'button', 'badge', 'banner', 
+                                       'ad', 'advertisement', 'social', 'pixel', 'tracking', '1x1', 'spacer', 'blank']
+                        if any(skip in src.lower() for skip in skip_keywords):
+                            continue
+                        
+                        img_title = (img.get_attribute('title') or '').lower()
+                        img_alt = (img.get_attribute('alt') or '').lower()
+                        img_class = (img.get_attribute('class') or '').lower()
+                        
+                        match_score = 0
+                        for word in title_words:
+                            if word in img_title:
+                                match_score += 5
+                            if word in img_alt:
+                                match_score += 5
+                            if word in src.lower():
+                                match_score += 2
+                        
+                        if 'featured' in img_class or 'main' in img_class or 'post' in img_class:
+                            match_score += 3
+                        if 'entry' in img_class or 'content' in img_class:
+                            match_score += 2
+                        
+                        try:
+                            parent = img.find_element(By.XPATH, './ancestor::article | ./ancestor::*[contains(@class, "entry-content")]')
+                            if parent:
+                                match_score += 3
+                        except:
+                            pass
+                        
+                        try:
+                            size = self.driver.execute_script(
+                                "return {width: arguments[0].naturalWidth, height: arguments[0].naturalHeight};", img
+                            )
+                            width = size.get('width', 0)
+                            height = size.get('height', 0)
+                        except:
+                            width_attr = img.get_attribute('width')
+                            height_attr = img.get_attribute('height')
+                            width = int(width_attr) if width_attr and width_attr.isdigit() else 0
+                            height = int(height_attr) if height_attr and height_attr.isdigit() else 0
+                        
+                        all_images.append({
+                            'src': src,
+                            'title': img_title,
+                            'alt': img_alt,
+                            'width': width,
+                            'height': height,
+                            'area': width * height,
+                            'match_score': match_score
+                        })
+                    except:
+                        continue
+                
+                all_images.sort(key=lambda x: (x['match_score'], x['area']), reverse=True)
+                
+                print(f"      Found {len(all_images)} candidate images")
+                if all_images:
+                    print(f"      Top match: score={all_images[0]['match_score']}, size={all_images[0]['width']}x{all_images[0]['height']}")
+                
+                for idx, img_info in enumerate(all_images[:15]):
+                    if img_info['area'] > 0 and img_info['area'] < 5000 and img_info['match_score'] < 3:
+                        continue
+                    
+                    imagem_url = img_info['src']
+                    match_info = f"score={img_info['match_score']}" if img_info['match_score'] > 0 else "no match"
+                    size_info = f"{img_info['width']}x{img_info['height']}" if img_info['area'] > 0 else "unknown size"
+                    print(f"      Trying image #{idx+1} ({size_info}, {match_info})")
+                    
+                    if img_info['match_score'] > 0:
+                        if img_info['title']:
+                            print(f"         Title: '{img_info['title'][:60]}'")
+                        if img_info['alt']:
+                            print(f"         Alt: '{img_info['alt'][:60]}'")
+                    
+                    recipe_data['imagem_url'] = imagem_url
+                    downloaded = self._download_image(imagem_url, pattern_slug)
+                    
+                    if downloaded != "N/A":
+                        recipe_data['imagem_local'] = downloaded
+                        print(f"      ✓ Successfully downloaded image (match score: {img_info['match_score']})")
+                        break
+                    
+                if recipe_data['imagem_local'] == "N/A":
+                    print("      ⚠ No suitable image could be downloaded")
+                    if all_images:
+                        print(f"         Tried {min(15, len(all_images))} candidates")
+                    
+            except Exception as e:
+                print(f"      Error extracting image: {e}")
 
             # Extract main content
             try:
-                # Try to find the main article content
                 content_selectors = [
                     (By.CLASS_NAME, "entry-content"),
                     (By.CLASS_NAME, "post-content"),
@@ -173,17 +356,14 @@ class AmigurumScraper(ScraperStrategy):
                         continue
 
                 if content_element:
-                    # Get all text from paragraphs and lists
                     all_text = []
                     
-                    # Get text from paragraphs
                     paragraphs = content_element.find_elements(By.TAG_NAME, "p")
                     for p in paragraphs:
                         text = p.text.strip()
                         if text:
                             all_text.append(text)
                     
-                    # Get text from lists (often used for materials)
                     lists = content_element.find_elements(By.TAG_NAME, "ul")
                     for ul in lists:
                         items = ul.find_elements(By.TAG_NAME, "li")
@@ -194,7 +374,6 @@ class AmigurumScraper(ScraperStrategy):
 
                     full_text = "\n".join(all_text)
                     
-                    # Try to separate materials and pattern
                     materials_section = []
                     pattern_section = []
                     is_pattern = False
@@ -202,11 +381,9 @@ class AmigurumScraper(ScraperStrategy):
                     for line in all_text:
                         lower_line = line.lower()
                         
-                        # Check if we're entering the pattern section
                         if any(keyword in lower_line for keyword in ['pattern', 'abbreviations', 'r 1:', 'r1:', 'round 1']):
                             is_pattern = True
                         
-                        # Check if we're in materials section
                         if any(keyword in lower_line for keyword in ['materials', 'yarn:', 'hook:', 'you will need']):
                             is_pattern = False
                         
@@ -218,7 +395,6 @@ class AmigurumScraper(ScraperStrategy):
                     recipe_data['materiais'] = "\n".join(materials_section)
                     recipe_data['receita'] = "\n".join(pattern_section)
                     
-                    # If separation failed, put everything in recipe
                     if not recipe_data['receita']:
                         recipe_data['receita'] = full_text
                 else:
@@ -239,15 +415,13 @@ class AmigurumScraper(ScraperStrategy):
         os.makedirs(os.path.join(self.db_dir, "resultados"), exist_ok=True)
 
         is_force_mode = args.get('force', False)
-        max_scrolls = args.get('max_pages')  # None if not specified = collect all
+        max_scrolls = args.get('max_pages')
 
-        # Load existing URLs
         urls_locais = set()
         if os.path.exists(self.url_file_path):
             with open(self.url_file_path, 'r', encoding='utf-8') as f:
                 urls_locais = set(line.strip() for line in f if line.strip())
 
-        # Collect URLs from site
         if max_scrolls:
             print(f"\nAmigurum scraper: Collecting URLs (max {max_scrolls} pages)...")
         else:
@@ -255,7 +429,6 @@ class AmigurumScraper(ScraperStrategy):
         
         urls_remotas = self.collect_recipe_urls(max_pages=max_scrolls)
 
-        # Save all URLs
         with open(self.url_file_path, 'w', encoding='utf-8') as f:
             for url in sorted(list(urls_remotas)):
                 f.write(f"{url}\n")
@@ -265,7 +438,6 @@ class AmigurumScraper(ScraperStrategy):
             print("Amigurum scraper: URLs updated. Halting as requested.")
             return
 
-        # Determine which URLs to process
         if is_force_mode:
             urls_to_extract = sorted(list(urls_remotas))
             print(f"\nForce mode: Processing all {len(urls_to_extract)} recipes...")
@@ -276,7 +448,6 @@ class AmigurumScraper(ScraperStrategy):
                 return
             print(f"\nAmigurum scraper: Processing {len(urls_to_extract)} new recipes...")
 
-        # Extract recipe details
         all_recipes_data = []
         for i, url in enumerate(urls_to_extract):
             print(f"[{i+1}/{len(urls_to_extract)}]")
@@ -284,9 +455,8 @@ class AmigurumScraper(ScraperStrategy):
             if recipe_data and recipe_data.get('titulo'):
                 all_recipes_data.append(recipe_data)
 
-        # Save to CSV
         if all_recipes_data:
-            df = pd.DataFrame(all_recipes_data, columns=['titulo', 'url', 'materiais', 'receita', 'origem'])
+            df = pd.DataFrame(all_recipes_data, columns=['titulo', 'url', 'imagem_url', 'imagem_local', 'materiais', 'receita', 'origem'])
             
             if is_force_mode or not os.path.exists(self.csv_file_path):
                 df.to_csv(self.csv_file_path, sep=';', index=False, encoding='utf-8-sig')

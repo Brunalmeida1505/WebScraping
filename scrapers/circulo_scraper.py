@@ -1,6 +1,7 @@
 import os
 import time
 import pandas as pd
+import requests
 from urllib.parse import urlparse, parse_qs, urlencode
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -21,6 +22,10 @@ class CirculoScraper(ScraperStrategy):
         self.arquivo_urls = os.path.join(self.diretorio_db, 'circulo_urls.txt')
         self.diretorio_resultados = os.path.join(self.diretorio_db, 'resultados')
         self.arquivo_saida_csv = os.path.join(self.diretorio_resultados, 'circulo_dados.csv')
+        self.images_dir = os.path.join('downloads', 'images', 'circulo_images')
+        
+        # Create images directory if it doesn't exist
+        os.makedirs(self.images_dir, exist_ok=True)
 
         # --- Selectors ---
         self.seletores_links_receitas = [
@@ -174,9 +179,105 @@ class CirculoScraper(ScraperStrategy):
         
         return urls_encontradas
 
+    def _download_image(self, image_url: str, pattern_slug: str) -> str:
+        """Downloads an image and saves it locally with retry logic."""
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                if not image_url or not image_url.startswith('http'):
+                    return "N/A"
+                
+                # Create a safe filename from pattern slug
+                parsed_url = urlparse(image_url)
+                file_extension = os.path.splitext(parsed_url.path)[1] or '.jpg'
+                # Clean the extension
+                if '?' in file_extension:
+                    file_extension = file_extension.split('?')[0]
+                if not file_extension:
+                    file_extension = '.jpg'
+                    
+                filename = f"{pattern_slug}{file_extension}"
+                filepath = os.path.join(self.images_dir, filename)
+                
+                # Check if image already exists
+                if os.path.exists(filepath):
+                    file_size = os.path.getsize(filepath)
+                    if file_size > 1000:  # At least 1KB
+                        print(f"      Image already exists: {filename}")
+                        return filepath
+                    else:
+                        # File exists but is too small, delete and retry
+                        os.remove(filepath)
+                        print(f"      Corrupted image found, re-downloading...")
+                
+                # Download the image with timeout
+                print(f"      Downloading image (attempt {attempt + 1}/{max_retries})...")
+                response = requests.get(
+                    image_url, 
+                    timeout=15,  # Increased timeout
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Referer': 'https://www.circulo.com.br/'
+                    },
+                    stream=True  # Stream for large images
+                )
+                
+                if response.status_code == 200:
+                    # Save image
+                    with open(filepath, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    # Verify file was saved correctly
+                    if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+                        print(f"      ✓ Downloaded image: {filename} ({os.path.getsize(filepath)} bytes)")
+                        return filepath
+                    else:
+                        print(f"      ⚠ Downloaded file too small, retrying...")
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                else:
+                    print(f"      Failed to download image: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return "N/A"
+                    
+            except requests.exceptions.Timeout:
+                print(f"      ⚠ Download timeout (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return "N/A"
+            except Exception as e:
+                print(f"      Error downloading image: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return "N/A"
+        
+        return "N/A"
+
     def extract_recipe_details(self, url_receita: str) -> dict:
         """Extracts details from a single recipe page."""
         self.driver.get(url_receita)
+        time.sleep(3)  # Increased wait time
+        
+        # Scroll to load lazy-loaded images
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
+        time.sleep(1)
+        self.driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+        
+        # Extract slug from URL for image naming
+        pattern_slug = url_receita.rstrip('/').split('/')[-1]
+        
         detalhes = {'url': url_receita, 'origem': self.name}
 
         try:
@@ -185,6 +286,105 @@ class CirculoScraper(ScraperStrategy):
                 detalhes['titulo'] = self.wait.until(EC.presence_of_element_located((By.TAG_NAME, self.tag_titulo))).text.strip()
             except TimeoutException:
                 detalhes['titulo'] = "Título não encontrado"
+            
+            # Extract main image with explicit wait
+            imagem_url = "N/A"
+            imagem_local = "N/A"
+            try:
+                print("   Extracting main image...")
+                
+                # Try multiple selectors to find the best image
+                img_selectors = [
+                    (By.CSS_SELECTOR, '.receita-detalhe__imagem img'),
+                    (By.CSS_SELECTOR, 'article img'),
+                    (By.CSS_SELECTOR, '.recipe-image img'),
+                    (By.CSS_SELECTOR, 'img[alt*="receita"]'),
+                    (By.TAG_NAME, 'img'),
+                ]
+                
+                # Collect all images on the page
+                all_images = []
+                for by, selector in img_selectors:
+                    try:
+                        imgs = self.driver.find_elements(by, selector)
+                        all_images.extend(imgs)
+                    except:
+                        continue
+                
+                # Remove duplicates based on src
+                seen_srcs = set()
+                unique_images = []
+                for img in all_images:
+                    try:
+                        src = img.get_attribute('src')
+                        if src and src not in seen_srcs:
+                            seen_srcs.add(src)
+                            unique_images.append(img)
+                    except:
+                        continue
+                
+                # Score images by size using JavaScript
+                image_candidates = []
+                for img in unique_images:
+                    try:
+                        src = img.get_attribute('src')
+                        if not src:
+                            continue
+                        
+                        # Skip common non-content images
+                        skip_keywords = ['logo', 'icon', 'avatar', 'button', 'badge', '1x1', 'pixel', 'banner']
+                        if any(keyword in src.lower() for keyword in skip_keywords):
+                            continue
+                        
+                        # Get actual image dimensions using JavaScript
+                        try:
+                            width = self.driver.execute_script("return arguments[0].naturalWidth;", img)
+                            height = self.driver.execute_script("return arguments[0].naturalHeight;", img)
+                            
+                            # Skip very small images
+                            if width and height and width > 150 and height > 150:
+                                area = width * height
+                                image_candidates.append({
+                                    'element': img,
+                                    'src': src,
+                                    'area': area,
+                                    'width': width,
+                                    'height': height
+                                })
+                        except:
+                            # If we can't get dimensions, still add as candidate with low priority
+                            image_candidates.append({
+                                'element': img,
+                                'src': src,
+                                'area': 0,
+                                'width': 0,
+                                'height': 0
+                            })
+                    except:
+                        continue
+                
+                # Sort by area (largest first)
+                image_candidates.sort(key=lambda x: x['area'], reverse=True)
+                
+                # Try to download images starting from the largest
+                for candidate in image_candidates[:5]:  # Try top 5 candidates
+                    imagem_url = candidate['src']
+                    print(f"      Found image: {imagem_url[:80]}...")
+                    if candidate['width'] > 0:
+                        print(f"      Dimensions: {candidate['width']}x{candidate['height']}")
+                    
+                    imagem_local = self._download_image(imagem_url, pattern_slug)
+                    if imagem_local != "N/A":
+                        break  # Success, stop trying
+                
+                if imagem_local == "N/A":
+                    print("      ⚠ No suitable image found or download failed")
+                    
+            except Exception as e:
+                print(f"      Error extracting image: {e}")
+            
+            detalhes['imagem_url'] = imagem_url
+            detalhes['imagem_local'] = imagem_local
 
             # Extract materials
             try:
@@ -248,7 +448,7 @@ class CirculoScraper(ScraperStrategy):
         print(f"Circulo scraper: Starting extraction of {len(urls_to_extract)} recipes...")
         new_data = [self.extract_recipe_details(url) for url in urls_to_extract]
 
-        df_novos = pd.DataFrame(new_data, columns=['titulo', 'url', 'materiais', 'receita', 'origem'])
+        df_novos = pd.DataFrame(new_data, columns=['titulo', 'url', 'imagem_url', 'imagem_local', 'materiais', 'receita', 'origem'])
         
         if is_force_mode or not os.path.exists(self.arquivo_saida_csv):
             df_novos.to_csv(self.arquivo_saida_csv, sep=';', encoding='utf-8-sig', index=False)

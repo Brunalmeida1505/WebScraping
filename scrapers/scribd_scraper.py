@@ -34,7 +34,7 @@ class ScribdScraper(ScraperStrategy):
         self.url_file_path = os.path.join(self.db_dir, 'scribd_urls.txt')
         self.csv_file_path = os.path.join(self.db_dir, 'resultados', 'scribd_dados.csv')
         self.parquet_file_path = os.path.join(self.db_dir, 'resultados', 'scribd_base64.parquet')
-        self.download_dir = os.path.join(os.getcwd(), "downloads", "scribd")
+        self.download_dir = os.path.join(os.getcwd(), "downloads", "pdfs", "scribd")
         self.is_logged_in = False
 
     def get_name(self) -> str:

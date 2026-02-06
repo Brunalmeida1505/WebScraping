@@ -323,6 +323,7 @@ https://www.circulo.com.br/receitas/jogo-do-sapo
 https://www.circulo.com.br/receitas/jogo-no-balao
 https://www.circulo.com.br/receitas/kit-escolar-ursinho
 https://www.circulo.com.br/receitas/lagartixa-agnes
+https://www.circulo.com.br/receitas/lagosta
 https://www.circulo.com.br/receitas/lhama
 https://www.circulo.com.br/receitas/lhama-juanita-baby
 https://www.circulo.com.br/receitas/libriana
@@ -399,6 +400,7 @@ https://www.circulo.com.br/receitas/papai-noel-e-os-presentes
 https://www.circulo.com.br/receitas/passarinho
 https://www.circulo.com.br/receitas/passista-iza
 https://www.circulo.com.br/receitas/pastelzinho
+https://www.circulo.com.br/receitas/patinha-tulipa
 https://www.circulo.com.br/receitas/patinho-godofredo
 https://www.circulo.com.br/receitas/pato-tadeu
 https://www.circulo.com.br/receitas/pedrinho-o-axolote
@@ -537,7 +539,6 @@ https://www.circulo.com.br/receitas/urso-polar-natalino
 https://www.circulo.com.br/receitas/vaquinha-sofi
 https://www.circulo.com.br/receitas/varal-abobora-com-aranha
 https://www.circulo.com.br/receitas/varal-coelhos-para-fotos
-https://www.circulo.com.br/receitas/varal-de-bandeirolas
 https://www.circulo.com.br/receitas/varal-de-fantasminhas
 https://www.circulo.com.br/receitas/varal-de-fantasminhas-1
 https://www.circulo.com.br/receitas/varal-de-pascoa

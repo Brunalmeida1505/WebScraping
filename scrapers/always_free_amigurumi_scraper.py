@@ -1,6 +1,8 @@
 import os
 import time
 import pandas as pd
+import requests
+from urllib.parse import urlparse
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
@@ -18,6 +20,10 @@ class AlwaysFreeAmigurumiScraper(ScraperStrategy):
         self.db_dir = "db"
         self.url_file_path = os.path.join(self.db_dir, "always_free_amigurumi_urls.txt")
         self.csv_file_path = os.path.join(self.db_dir, "resultados", "always_free_amigurumi_data.csv")
+        self.images_dir = os.path.join('downloads', 'images', 'alwaysfreeamigurumi_images')
+        
+        # Create images directory if it doesn't exist
+        os.makedirs(self.images_dir, exist_ok=True)
 
     def get_name(self) -> str:
         return self.name
@@ -93,13 +99,118 @@ class AlwaysFreeAmigurumiScraper(ScraperStrategy):
         print(f"\nFound {len(recipe_urls)} unique recipe URLs after scanning up to {max_pages} pages.")
         return recipe_urls
 
+    def _download_image(self, image_url: str, pattern_slug: str) -> str:
+        """Downloads an image and saves it locally with retry logic."""
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                if not image_url or not image_url.startswith('http'):
+                    return "N/A"
+                
+                # Create a safe filename from pattern slug
+                parsed_url = urlparse(image_url)
+                file_extension = os.path.splitext(parsed_url.path)[1] or '.jpg'
+                # Clean the extension
+                if '?' in file_extension:
+                    file_extension = file_extension.split('?')[0]
+                if not file_extension:
+                    file_extension = '.jpg'
+                    
+                filename = f"{pattern_slug}{file_extension}"
+                filepath = os.path.join(self.images_dir, filename)
+                
+                # Check if image already exists
+                if os.path.exists(filepath):
+                    file_size = os.path.getsize(filepath)
+                    if file_size > 1000:  # At least 1KB
+                        print(f"      Image already exists: {filename}")
+                        return filepath
+                    else:
+                        # File exists but is too small, delete and retry
+                        os.remove(filepath)
+                        print(f"      Corrupted image found, re-downloading...")
+                
+                # Download the image with timeout
+                print(f"      Downloading image (attempt {attempt + 1}/{max_retries})...")
+                response = requests.get(
+                    image_url, 
+                    timeout=15,  # Increased timeout
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Referer': self.base_url
+                    },
+                    stream=True  # Stream for large images
+                )
+                
+                if response.status_code == 200:
+                    # Save image
+                    with open(filepath, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    # Verify file was saved correctly
+                    if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+                        print(f"      ✓ Downloaded image: {filename} ({os.path.getsize(filepath)} bytes)")
+                        return filepath
+                    else:
+                        print(f"      ⚠ Downloaded file too small, retrying...")
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                else:
+                    print(f"      Failed to download image: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    return "N/A"
+                    
+            except requests.exceptions.Timeout:
+                print(f"      ⚠ Download timeout (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return "N/A"
+            except Exception as e:
+                print(f"      Error downloading image: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return "N/A"
+        
+        return "N/A"
+
     def extract_recipe_details(self, url: str) -> dict:
         """Extracts details from a single recipe page with a more robust, section-aware approach."""
+        print(f"\nProcessing: {url}")
         self.driver.get(url)
-        time.sleep(2)  # Allow page to load
+        time.sleep(3)  # Allow page to load
+        
+        # Scroll to load lazy-loaded images
+        print("   Loading images...")
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
+        time.sleep(1)
+        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+        time.sleep(1)
+        self.driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+        
+        # Extract slug from URL for image naming
+        pattern_slug = url.rstrip('/').split('/')[-1]
 
         recipe_data = {
-            'titulo': '', 'url': url, 'materiais': '', 'abreviacoes': '', 'receita': '', 'origem': self.name
+            'titulo': '', 
+            'url': url, 
+            'imagem_url': 'N/A',
+            'imagem_local': 'N/A',
+            'materiais': '', 
+            'abreviacoes': '', 
+            'receita': '', 
+            'origem': self.name
         }
 
         try:
@@ -110,7 +221,73 @@ class AlwaysFreeAmigurumiScraper(ScraperStrategy):
                 # Fallback to another common title element if h1 is not found
                 recipe_data['titulo'] = self.driver.find_element(By.CLASS_NAME, "entry-title").text.strip()
 
-            # 2. Robust Content Extraction
+            # 2. Extract main image with explicit wait
+            try:
+                print("   Extracting main image...")
+                # Try to find the featured image with multiple selectors
+                img_selectors = [
+                    (By.CSS_SELECTOR, 'article img'),
+                    (By.CSS_SELECTOR, '.entry-content img'),
+                    (By.CSS_SELECTOR, '.wp-post-image'),
+                    (By.CSS_SELECTOR, 'img[src*="alwaysfreeamigurumi"]'),
+                    (By.TAG_NAME, 'img'),
+                ]
+                
+                img_elem = None
+                for by, selector in img_selectors:
+                    try:
+                        # Wait for image to be present
+                        img_elem = WebDriverWait(self.driver, 8).until(
+                            EC.presence_of_element_located((by, selector))
+                        )
+                        
+                        # Get image source
+                        imagem_url = img_elem.get_attribute('src')
+                        
+                        # Skip small images, logos, icons, and placeholders
+                        if imagem_url and not any(skip in imagem_url.lower() for skip in 
+                                                   ['logo', 'icon', 'avatar', 'button', 'badge', '1x1']):
+                            # Check if image has reasonable dimensions
+                            try:
+                                width = img_elem.get_attribute('width')
+                                height = img_elem.get_attribute('height')
+                                if width and height:
+                                    w = int(width) if width.isdigit() else 0
+                                    h = int(height) if height.isdigit() else 0
+                                    # Skip very small images
+                                    if w > 100 and h > 100:
+                                        print(f"      Found image: {imagem_url[:80]}...")
+                                        recipe_data['imagem_url'] = imagem_url
+                                        # Download the image
+                                        recipe_data['imagem_local'] = self._download_image(imagem_url, pattern_slug)
+                                        if recipe_data['imagem_local'] != "N/A":
+                                            break
+                                else:
+                                    # No dimensions specified, try downloading anyway
+                                    print(f"      Found image: {imagem_url[:80]}...")
+                                    recipe_data['imagem_url'] = imagem_url
+                                    recipe_data['imagem_local'] = self._download_image(imagem_url, pattern_slug)
+                                    if recipe_data['imagem_local'] != "N/A":
+                                        break
+                            except:
+                                # If we can't check dimensions, try downloading
+                                print(f"      Found image: {imagem_url[:80]}...")
+                                recipe_data['imagem_url'] = imagem_url
+                                recipe_data['imagem_local'] = self._download_image(imagem_url, pattern_slug)
+                                if recipe_data['imagem_local'] != "N/A":
+                                    break
+                    except TimeoutException:
+                        continue
+                    except Exception as e:
+                        continue
+                
+                if recipe_data['imagem_local'] == "N/A" and recipe_data['imagem_url'] == "N/A":
+                    print("      ⚠ No suitable image found")
+                    
+            except Exception as e:
+                print(f"      Error extracting image: {e}")
+
+            # 3. Robust Content Extraction
             try:
                 content_container = self.driver.find_element(By.CLASS_NAME, "entry-content")
             except NoSuchElementException:
@@ -181,7 +358,7 @@ class AlwaysFreeAmigurumiScraper(ScraperStrategy):
     def run(self, args: dict):
         os.makedirs(os.path.join(self.db_dir, "resultados"), exist_ok=True)
 
-        max_pages = args.get('max_pages') or 10  # Default to 10 if None
+        max_pages = args.get('max_pages') or 50  # Default to 10 if None
         urls_to_process = self.collect_recipe_urls(max_pages=max_pages)
         
         if not urls_to_process:
@@ -196,7 +373,7 @@ class AlwaysFreeAmigurumiScraper(ScraperStrategy):
         all_recipes_data = [self.extract_recipe_details(url) for url in urls_to_process]
         
         if all_recipes_data:
-            df = pd.DataFrame(all_recipes_data, columns=['titulo', 'url', 'materiais', 'abreviacoes', 'receita', 'origem'])
+            df = pd.DataFrame(all_recipes_data, columns=['titulo', 'url', 'imagem_url', 'imagem_local', 'materiais', 'abreviacoes', 'receita', 'origem'])
             df.to_csv(self.csv_file_path, sep=';', index=False, encoding='utf-8-sig')
             print(f"\n✓ Data saved successfully to '{self.csv_file_path}'")
         else:

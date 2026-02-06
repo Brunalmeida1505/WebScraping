@@ -306,12 +306,21 @@ for origem in df['origem'].dropna().unique():
     # Calcular métricas
     qtd = len(df_origem)
     
-    # Verificar se tem coluna receita (Scribd não tem)
-    if 'receita' not in df_origem.columns:
+    # Scribd usa 'texto', outros scrapers usam 'receita'
+    # Verificar qual coluna tem dados para esta origem específica
+    tem_texto = 'texto' in df_origem.columns and df_origem['texto'].notna().any()
+    tem_receita = 'receita' in df_origem.columns and df_origem['receita'].notna().any()
+    
+    if tem_texto:
+        coluna_texto = 'texto'
+    elif tem_receita:
+        coluna_texto = 'receita'
+    else:
+        # Sem dados de texto para esta origem
         continue
     
-    # Tamanho médio da receita
-    receitas_validas = df_origem['receita'].dropna()
+    # Tamanho médio do texto/receita
+    receitas_validas = df_origem[coluna_texto].dropna()
     receitas_validas = receitas_validas[receitas_validas != '']
     if len(receitas_validas) == 0:
         continue  # Pular scrapers sem receitas válidas

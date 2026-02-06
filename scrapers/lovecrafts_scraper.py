@@ -31,7 +31,7 @@ class LovecraftsScraper(ScraperStrategy):
         self.db_dir = 'db'
         self.url_file_path = os.path.join(self.db_dir, 'lovecrafts_urls.txt')
         self.csv_file_path = os.path.join(self.db_dir, 'resultados', 'lovecrafts_dados.csv')
-        self.download_dir = os.path.join(os.getcwd(), "downloads")
+        self.download_dir = os.path.join(os.getcwd(), "downloads", "pdfs", "lovecrafts")
         self.is_logged_in = False
 
     def get_name(self) -> str:

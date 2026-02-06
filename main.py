@@ -9,6 +9,10 @@ from scrapers.lovecrafts_scraper import LovecraftsScraper
 from scrapers.amigurum_scraper import AmigurumScraper
 from scrapers.ravelry_scraper import RavelryScraper
 from scrapers.scribd_scraper import ScribdScraper
+from scrapers.menagerie_scraper import MenagerieScraper
+from scrapers.lilleliis_scraper import LillelisScraper
+from scrapers.myamigurumifarm_scraper import MyAmigurumiFarmScraper
+from scrapers.amigurumitoday_scraper import AmigurumiTodayScraper
 
 # Maps scraper names to their classes
 AVAILABLE_SCRAPERS = {
@@ -19,6 +23,10 @@ AVAILABLE_SCRAPERS = {
     "amigurum": AmigurumScraper,
     "ravelry": RavelryScraper,
     "scribd": ScribdScraper,
+    "menagerie": MenagerieScraper,
+    "lilleliis": LillelisScraper,
+    "myamigurumifarm": MyAmigurumiFarmScraper,
+    "amigurumitoday": AmigurumiTodayScraper,
 }
 
 def setup_driver(headless: bool = True, scraper_name: str = None, use_profile: bool = False) -> webdriver.Chrome:
@@ -50,6 +58,31 @@ def setup_driver(headless: bool = True, scraper_name: str = None, use_profile: b
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
             "plugins.always_open_pdf_externally": True
+        })
+    
+    # Special configuration for AmigurumiToday (Cloudflare protection)
+    if scraper_name == "amigurumitoday":
+        # Use non-headless mode to bypass Cloudflare
+        if headless:
+            print("   ⚠ AmigurumiToday requires non-headless mode due to Cloudflare protection")
+            print("   Switching to visible browser mode...")
+            # Remove headless argument if it was added
+            if "--headless=new" in options.arguments:
+                options.arguments.remove("--headless=new")
+        
+        # Add more realistic browser settings
+        options.add_argument("--start-maximized")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # Exclude automation switches to avoid detection
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        
+        # Add preferences to look more like a real browser
+        options.add_experimental_option("prefs", {
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.default_content_settings.popups": 0
         })
     
     # Special configuration for Scribd (needs PDF download)
