@@ -32,3 +32,6 @@ temp/
 # OS
 .DS_Store
 Thumbs.db
+
+# Sync scripts
+sync_scribd_csv_parquet.py

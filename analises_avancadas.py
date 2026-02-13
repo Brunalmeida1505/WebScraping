@@ -11,8 +11,13 @@ import numpy as np
 import glob
 import os
 import re
+import sys
 from collections import Counter
 from processar_scribd import processar_scribd
+
+# Fix encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
 
 print("=" * 80)
 print(" " * 20 + "ANÁLISES AVANÇADAS - AMIGURUMI")
@@ -30,10 +35,9 @@ dfs = []
 for f in arquivos_csv:
     try:
         nome = os.path.basename(f)
-        
-        # 🚫 SKIP SCRIBD CSVs - processaremos o Parquet com base64
+        # Prefer Parquet for Scribd: skip Scribd CSV if present
         if 'scribd' in nome.lower():
-            print(f"  ⏭️ {nome:30} → Será processado do Parquet")
+            print(f"  ⏭️ {nome:30} → CSV do Scribd será ignorado (usar Parquet)")
             continue
         
         # Detectar separador automaticamente
@@ -55,10 +59,86 @@ arquivos_parquet = glob.glob(os.path.join(pasta, "*.parquet"))
 for f in arquivos_parquet:
     nome = os.path.basename(f).lower()
     
-    # 🚫 SKIP Scribd Parquet - será processado separadamente
-    if 'scribd' in nome:
-        print(f"  ⏭️ {os.path.basename(f):30} → Será processado do base64")
-        continue
+    # If this is the Scribd base64 parquet, load it and build compatible columns
+    if 'scribd' in nome and 'base64' in nome:
+        try:
+            dfp = pd.read_parquet(f)
+            # Normalize columns and keep relevant fields
+            # Expected columns: url, title, pdf_path, base64_content (may vary)
+            cols = set(dfp.columns)
+            # prefer base64_content or base64
+            if 'base64_content' in cols or 'base64' in cols:
+                df_s = pd.DataFrame()
+                df_s['url'] = dfp.get('url')
+                df_s['title'] = dfp.get('title')
+                df_s['pdf_path'] = dfp.get('pdf_path')
+                # keep base64 if present
+                if 'base64_content' in cols:
+                    df_s['base64_content'] = dfp['base64_content']
+                elif 'base64' in cols:
+                    df_s['base64_content'] = dfp['base64']
+                else:
+                    df_s['base64_content'] = None
+
+                # Mark origem and standardize title->titulo
+                df_s['origem'] = 'Scribd'
+                if 'title' in df_s.columns and 'titulo' not in df_s.columns:
+                    df_s['titulo'] = df_s['title']
+
+                # Try to populate imagem_local by scanning images folder
+                imagens_dir = os.path.join('downloads', 'images', 'scribd_images')
+                image_map = {}
+                if os.path.exists(imagens_dir):
+                    for img in os.listdir(imagens_dir):
+                        key = os.path.splitext(img)[0]
+                        image_map[key] = os.path.join(imagens_dir, img)
+
+                def _find_image(row):
+                    # candidates: pdf filename without ext, slug from url, title token
+                    try:
+                        pdf_path = row.get('pdf_path') or ''
+                        pdf_fn = os.path.splitext(os.path.basename(pdf_path))[0]
+                        if pdf_fn and pdf_fn in image_map:
+                            return image_map[pdf_fn]
+
+                        url = str(row.get('url') or '')
+                        slug = url.rstrip('/').split('/')[-1]
+                        if slug and slug in image_map:
+                            return image_map[slug]
+
+                        title = str(row.get('title') or '')
+                        if title and title in image_map:
+                            return image_map[title]
+
+                        # fallback: try prefix match
+                        for k, v in image_map.items():
+                            if slug and k.startswith(slug):
+                                return v
+                            if pdf_fn and k.startswith(pdf_fn):
+                                return v
+                            if title and k.startswith(title):
+                                return v
+                    except:
+                        return None
+                    return None
+
+                if image_map:
+                    df_s['imagem_local'] = df_s.apply(_find_image, axis=1)
+                else:
+                    df_s['imagem_local'] = None
+
+                # imagem_url mirror or N/A
+                df_s['imagem_url'] = df_s['imagem_local'].apply(lambda x: x if pd.notna(x) and x else 'N/A')
+                df_s['pdf_downloaded'] = df_s['pdf_path'].notna() & (df_s['pdf_path'] != 'N/A')
+
+                print(f"  ✓ {os.path.basename(f):30} → {len(df_s):4} receitas (Scribd parquet)")
+                dfs.append(df_s)
+                continue
+            else:
+                print(f"  ⚠️ {os.path.basename(f):30} → Parquet não contém base64, carregando normalmente")
+        except Exception as e:
+            print(f"  ⚠️ Erro ao ler {nome}: {e}")
+            continue
     
     try:
         df = pd.read_parquet(f)
@@ -69,27 +149,13 @@ for f in arquivos_parquet:
     except Exception as e:
         print(f"  ⚠️ Erro ao ler {nome}: {e}")
 
-# ============================================================================
-# PROCESSAR SCRIBD (Base64 → Texto)
-# ============================================================================
-print("\n🔄 Processando dados do Scribd...")
-try:
-    df_scribd = processar_scribd()
-    if not df_scribd.empty:
-        com_texto = len(df_scribd[df_scribd['num_palavras'] > 50])
-        total_palavras = df_scribd['num_palavras'].sum()
-        
-        print(f"  ✓ scribd_base64.parquet → {len(df_scribd):4} documentos processados")
-        print(f"    • Com texto extraível: {com_texto}/{len(df_scribd)}")
-        print(f"    • Total de palavras: {total_palavras:,}")
-        
-        dfs.append(df_scribd)
-    else:
-        print(f"  ⚠️  Nenhum dado Scribd encontrado")
-except Exception as e:
-    print(f"  ⚠️  Erro ao processar Scribd: {e}")
-
+# Concatenar todos os DataFrames
 df = pd.concat(dfs, ignore_index=True)
+
+# Padronizar nomes de colunas
+if 'title' in df.columns and 'titulo' not in df.columns:
+    df['titulo'] = df['title']
+
 print(f"✅ Total: {len(df)} receitas carregadas\n")
 
 # ============================================================================
@@ -285,10 +351,177 @@ for item, freq in sorted(acessorios.items(), key=lambda x: x[1], reverse=True):
         print(f"  {item:20} → {freq:4} vezes {barra}")
 
 # ============================================================================
-# 4. COMPARAÇÃO DE COMPLEXIDADE ENTRE SCRAPERS
+# 4. ANÁLISE DE IMAGENS COLETADAS
 # ============================================================================
 print("\n" + "=" * 80)
-print("⚙️ 4. COMPARAÇÃO DE COMPLEXIDADE ENTRE SCRAPERS")
+print("🖼️ 4. ANÁLISE DE IMAGENS COLETADAS")
+print("=" * 80)
+
+# Verificar quais scrapers têm coluna de imagem
+tem_imagem = 'imagem_url' in df.columns or 'imagem_local' in df.columns
+
+if tem_imagem:
+    # Análise por scraper
+    print("\n📊 ESTATÍSTICAS DE IMAGENS POR SCRAPER:\n")
+    print(f"{'Scraper':20} {'Total':>10} {'Com Imagem':>12} {'Taxa':>10} {'Tamanho Médio':>15}")
+    print("-" * 80)
+    
+    total_receitas = 0
+    total_com_imagem = 0
+    total_tamanho = 0
+    
+    for origem in df['origem'].dropna().unique():
+        if not origem or str(origem).strip() == '' or pd.isna(origem):
+            continue
+            
+        df_origem = df[df['origem'] == origem]
+        qtd_total = len(df_origem)
+        
+        # Contar imagens válidas (não N/A e não ERROR)
+        tamanhos = []  # Inicializar aqui
+        if 'imagem_local' in df_origem.columns:
+            imagens_validas = df_origem['imagem_local'].notna() & \
+                             (df_origem['imagem_local'] != 'N/A') & \
+                             (df_origem['imagem_local'] != 'ERROR') & \
+                             (df_origem['imagem_local'] != '')
+            qtd_com_imagem = imagens_validas.sum()
+            
+            # Calcular tamanho médio das imagens
+            tamanho_medio = 0
+            if qtd_com_imagem > 0:
+                caminhos_validos = df_origem[imagens_validas]['imagem_local']
+                for caminho in caminhos_validos:
+                    try:
+                        if os.path.exists(str(caminho)):
+                            tamanhos.append(os.path.getsize(str(caminho)))
+                    except:
+                        pass
+                if tamanhos:
+                    tamanho_medio = sum(tamanhos) / len(tamanhos)
+        else:
+            qtd_com_imagem = 0
+            tamanho_medio = 0
+        
+        taxa = (qtd_com_imagem / qtd_total * 100) if qtd_total > 0 else 0
+        
+        # Formatar tamanho
+        if tamanho_medio > 1024 * 1024:
+            tam_str = f"{tamanho_medio / (1024*1024):.1f} MB"
+        elif tamanho_medio > 1024:
+            tam_str = f"{tamanho_medio / 1024:.1f} KB"
+        else:
+            tam_str = f"{tamanho_medio:.0f} B" if tamanho_medio > 0 else "N/A"
+        
+        print(f"{origem:20} {qtd_total:>10} {qtd_com_imagem:>12} {taxa:>9.1f}% {tam_str:>15}")
+        
+        total_receitas += qtd_total
+        total_com_imagem += qtd_com_imagem
+        if tamanhos:
+            total_tamanho += sum(tamanhos)
+    
+    print("-" * 80)
+    taxa_geral = (total_com_imagem / total_receitas * 100) if total_receitas > 0 else 0
+    tam_geral_str = f"{total_tamanho / (1024*1024):.1f} MB" if total_tamanho > 0 else "N/A"
+    print(f"{'TOTAL':20} {total_receitas:>10} {total_com_imagem:>12} {taxa_geral:>9.1f}% {tam_geral_str:>15}")
+    
+    # Estatísticas detalhadas
+    print("\n\n📈 ESTATÍSTICAS DETALHADAS DE IMAGENS:\n")
+    
+    if 'imagem_local' in df.columns:
+        imagens_validas_df = df[df['imagem_local'].notna() & 
+                                (df['imagem_local'] != 'N/A') & 
+                                (df['imagem_local'] != 'ERROR') & 
+                                (df['imagem_local'] != '')]
+        
+        if len(imagens_validas_df) > 0:
+            # Coletar informações de todas as imagens
+            tamanhos_imagens = []
+            formatos = []
+            
+            for caminho in imagens_validas_df['imagem_local']:
+                try:
+                    caminho_str = str(caminho)
+                    if os.path.exists(caminho_str):
+                        tamanho = os.path.getsize(caminho_str)
+                        tamanhos_imagens.append(tamanho)
+                        
+                        # Extrair formato
+                        ext = os.path.splitext(caminho_str)[1].lower()
+                        formatos.append(ext if ext else 'sem extensão')
+                except:
+                    pass
+            
+            if tamanhos_imagens:
+                print(f"  • Total de imagens coletadas: {len(tamanhos_imagens)}")
+                print(f"  • Tamanho total: {sum(tamanhos_imagens) / (1024*1024):.2f} MB")
+                print(f"  • Tamanho médio: {sum(tamanhos_imagens) / len(tamanhos_imagens) / 1024:.1f} KB")
+                print(f"  • Maior imagem: {max(tamanhos_imagens) / 1024:.1f} KB")
+                print(f"  • Menor imagem: {min(tamanhos_imagens) / 1024:.1f} KB")
+                
+                # Distribuição de formatos
+                print("\n  📁 FORMATOS DE IMAGEM:\n")
+                formato_count = Counter(formatos)
+                for formato, qtd in sorted(formato_count.items(), key=lambda x: x[1], reverse=True):
+                    pct = (qtd / len(formatos)) * 100
+                    barra = "█" * int(pct / 2)
+                    print(f"    {formato:15} → {qtd:4} ({pct:5.1f}%) {barra}")
+                
+                # Distribuição de tamanhos
+                print("\n  📊 DISTRIBUIÇÃO DE TAMANHO DAS IMAGENS:\n")
+                bins_kb = [0, 10, 50, 100, 200, 500, float('inf')]
+                labels_kb = ['Muito pequena (<10KB)', 'Pequena (10-50KB)', 'Média (50-100KB)', 
+                            'Grande (100-200KB)', 'Muito grande (200-500KB)', 'Enorme (>500KB)']
+                
+                tamanhos_kb = [t / 1024 for t in tamanhos_imagens]
+                for i in range(len(bins_kb)-1):
+                    count = sum(1 for t in tamanhos_kb if bins_kb[i] <= t < bins_kb[i+1])
+                    pct = (count / len(tamanhos_kb)) * 100
+                    barra = "█" * int(pct / 2)
+                    print(f"    {labels_kb[i]:30} → {count:4} ({pct:5.1f}%) {barra}")
+            else:
+                print("  ⚠️ Nenhuma imagem encontrada nos caminhos especificados")
+        else:
+            print("  ⚠️ Nenhuma receita com imagem válida encontrada")
+    
+    # Top scrapers com melhor taxa de imagens
+    print("\n\n🏆 TOP SCRAPERS COM MELHOR TAXA DE IMAGENS:\n")
+    
+    taxas_scrapers = []
+    for origem in df['origem'].dropna().unique():
+        if not origem or str(origem).strip() == '' or pd.isna(origem):
+            continue
+            
+        df_origem = df[df['origem'] == origem]
+        qtd_total = len(df_origem)
+        
+        if 'imagem_local' in df_origem.columns and qtd_total >= 5:  # Apenas scrapers com pelo menos 5 receitas
+            imagens_validas = df_origem['imagem_local'].notna() & \
+                             (df_origem['imagem_local'] != 'N/A') & \
+                             (df_origem['imagem_local'] != 'ERROR') & \
+                             (df_origem['imagem_local'] != '')
+            qtd_com_imagem = imagens_validas.sum()
+            taxa = (qtd_com_imagem / qtd_total * 100) if qtd_total > 0 else 0
+            
+            taxas_scrapers.append({
+                'origem': origem,
+                'taxa': taxa,
+                'com_imagem': qtd_com_imagem,
+                'total': qtd_total
+            })
+    
+    for i, item in enumerate(sorted(taxas_scrapers, key=lambda x: x['taxa'], reverse=True), 1):
+        emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "  "
+        print(f"  {emoji} {i}º {item['origem']:20} → {item['taxa']:5.1f}% ({item['com_imagem']}/{item['total']})")
+    
+else:
+    print("\n⚠️ Nenhuma coluna de imagem encontrada nos dados.")
+    print("   Execute os scrapers com a funcionalidade de imagens implementada.")
+
+# ============================================================================
+# 5. COMPARAÇÃO DE COMPLEXIDADE ENTRE SCRAPERS
+# ============================================================================
+print("\n" + "=" * 80)
+print("⚙️ 5. COMPARAÇÃO DE COMPLEXIDADE ENTRE SCRAPERS")
 print("=" * 80)
 
 # Análise por origem
