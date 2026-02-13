@@ -184,6 +184,11 @@ def main():
         help='Process only URLs that are not yet present in the results CSV (scribd_dados.csv).'
     )
     parser.add_argument(
+        '--retry-failed',
+        action='store_true',
+        help='(Scribd) Retry downloading PDFs for URLs that previously failed (pdf_downloaded=False).'
+    )
+    parser.add_argument(
         '--use-profile',
         action='store_true',
         help='(Scribd) Use your existing Chrome profile (avoids "not secure" warnings).'

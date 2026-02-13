@@ -13,6 +13,17 @@ from selenium.webdriver.common.keys import Keys
 
 from scrapers.base_scraper import ScraperStrategy
 
+# Try to import PyMuPDF for image extraction
+try:
+    import fitz  # PyMuPDF
+    from PIL import Image
+    import io
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+    print("⚠ PyMuPDF not installed. Install with: pip install PyMuPDF Pillow")
+    print("   Image extraction from PDFs will be disabled.")
+
 # Try to load .env file if python-dotenv is available
 try:
     from dotenv import load_dotenv
@@ -35,7 +46,11 @@ class ScribdScraper(ScraperStrategy):
         self.csv_file_path = os.path.join(self.db_dir, 'resultados', 'scribd_dados.csv')
         self.parquet_file_path = os.path.join(self.db_dir, 'resultados', 'scribd_base64.parquet')
         self.download_dir = os.path.join(os.getcwd(), "downloads", "pdfs", "scribd")
+        self.images_dir = os.path.join('downloads', 'images', 'scribd_images')
         self.is_logged_in = False
+        
+        # Create images directory
+        os.makedirs(self.images_dir, exist_ok=True)
 
     def get_name(self) -> str:
         return self.name
@@ -698,6 +713,91 @@ class ScribdScraper(ScraperStrategy):
             print(f"      ✗ Error converting to base64: {e}")
             return None
 
+    def _extract_image_from_pdf(self, pdf_path: str, document_slug: str) -> tuple:
+        """
+        Extracts the first valid image from a PDF file.
+        Returns: (image_url, image_local_path)
+        """
+        if not PYMUPDF_AVAILABLE:
+            print("      ⚠ PyMuPDF not available, skipping image extraction")
+            return ("N/A", "N/A")
+        
+        if not pdf_path or not os.path.exists(pdf_path):
+            print("      ⚠ PDF file not found, skipping image extraction")
+            return ("N/A", "N/A")
+        
+        try:
+            print("      Extracting images from PDF...")
+            pdf = fitz.open(pdf_path)
+            
+            # Try to extract images from first few pages
+            max_pages = min(3, len(pdf))  # Check first 3 pages
+            
+            for page_num in range(max_pages):
+                page = pdf[page_num]
+                image_list = page.get_images()
+                
+                if not image_list:
+                    continue
+                
+                print(f"        Found {len(image_list)} images on page {page_num + 1}")
+                
+                # Try each image on the page
+                for img_index, img in enumerate(image_list):
+                    try:
+                        xref = img[0]
+                        base_image = pdf.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        image_ext = base_image["ext"]
+                        
+                        # Open image to check dimensions
+                        img_obj = Image.open(io.BytesIO(image_bytes))
+                        width, height = img_obj.size
+                        
+                        # Filter: minimum 150x150, skip very small images
+                        if width < 150 or height < 150:
+                            print(f"          Skipping small image: {width}x{height}")
+                            continue
+                        
+                        # Filter: skip very wide or very tall images (likely banners/headers)
+                        aspect_ratio = max(width, height) / min(width, height)
+                        if aspect_ratio > 3:
+                            print(f"          Skipping banner-like image: {width}x{height}")
+                            continue
+                        
+                        # Save the image
+                        filename = f"{document_slug}_page{page_num+1}_{img_index}.{image_ext}"
+                        filepath = os.path.join(self.images_dir, filename)
+                        
+                        # Check if already exists
+                        if os.path.exists(filepath):
+                            file_size = os.path.getsize(filepath)
+                            if file_size > 1000:
+                                print(f"        ✓ Image already exists: {filename}")
+                                pdf.close()
+                                return (f"PDF_PAGE_{page_num+1}", filepath)
+                        
+                        # Save image
+                        with open(filepath, 'wb') as img_file:
+                            img_file.write(image_bytes)
+                        
+                        file_size = os.path.getsize(filepath)
+                        print(f"        ✓ Extracted image: {filename} ({width}x{height}, {file_size} bytes)")
+                        pdf.close()
+                        return (f"PDF_PAGE_{page_num+1}", filepath)
+                        
+                    except Exception as e:
+                        print(f"          Error processing image {img_index}: {e}")
+                        continue
+            
+            pdf.close()
+            print("      ⚠ No suitable images found in PDF")
+            return ("N/A", "N/A")
+            
+        except Exception as e:
+            print(f"      ✗ Error extracting images from PDF: {e}")
+            return ("N/A", "N/A")
+
     def extract_recipe_details(self, url: str) -> dict:
         """Extracts details from a Scribd document URL and downloads PDF."""
         print(f"\nProcessing: {url}")
@@ -732,6 +832,19 @@ class ScribdScraper(ScraperStrategy):
             # Download PDF
             pdf_path = self._download_pdf(url)
             
+            # Extract image from PDF
+            imagem_url = "N/A"
+            imagem_local = "N/A"
+            if pdf_path and os.path.exists(pdf_path):
+                # Create document slug from URL for image naming
+                document_slug = url.rstrip('/').split('/')[-1]
+                if not document_slug or len(document_slug) < 5:
+                    # Fallback to title-based slug
+                    import re
+                    document_slug = re.sub(r'[^a-zA-Z0-9]+', '-', title.lower())[:50]
+                
+                imagem_url, imagem_local = self._extract_image_from_pdf(pdf_path, document_slug)
+            
             # Convert to base64
             base64_content = None
             if pdf_path and os.path.exists(pdf_path):
@@ -742,9 +855,12 @@ class ScribdScraper(ScraperStrategy):
                 'title': title,
                 'author': author,
                 'description': description,
+                'imagem_url': imagem_url,
+                'imagem_local': imagem_local,
                 'pdf_downloaded': pdf_path is not None,
                 'pdf_path': pdf_path if pdf_path else "N/A",
-                'base64_content': base64_content if base64_content else None
+                'base64_content': base64_content if base64_content else None,
+                'origem': self.name
             }
             
         except Exception as e:
@@ -754,9 +870,12 @@ class ScribdScraper(ScraperStrategy):
                 'title': "ERROR",
                 'author': "ERROR",
                 'description': str(e),
+                'imagem_url': "N/A",
+                'imagem_local': "N/A",
                 'pdf_downloaded': False,
                 'pdf_path': "N/A",
-                'base64_content': None
+                'base64_content': None,
+                'origem': self.name
             }
 
     def _save_urls_to_file(self, urls: set):
@@ -776,45 +895,78 @@ class ScribdScraper(ScraperStrategy):
 
     def _save_results_to_csv(self, results: list):
         """Saves scraping results to CSV (without base64) and Parquet (with base64)."""
+        if not results:
+            print("⚠️  No results to save")
+            return
+            
         results_dir = os.path.join(self.db_dir, 'resultados')
         os.makedirs(results_dir, exist_ok=True)
         
         # Create DataFrame with all data
-        df_full = pd.DataFrame(results)
+        try:
+            df_full = pd.DataFrame(results)
+        except Exception as e:
+            print(f"❌ Error creating DataFrame from results: {e}")
+            return
         
         # Save full data (including base64) to Parquet (merge with existing if present)
         if 'base64_content' in df_full.columns:
-            df_parquet = df_full[['url', 'title', 'pdf_path', 'base64_content']].copy()
-            df_parquet = df_parquet[df_parquet['base64_content'].notna()]  # Only rows with base64
-            
-            if not df_parquet.empty:
-                # If parquet exists, merge to avoid losing previous data
-                try:
-                    if os.path.exists(self.parquet_file_path):
-                        existing = pd.read_parquet(self.parquet_file_path)
-                        combined = pd.concat([existing, df_parquet], ignore_index=True)
-                        combined = combined.drop_duplicates(subset=['url'], keep='first')
-                        combined.to_parquet(self.parquet_file_path, index=False, compression='snappy')
-                    else:
-                        df_parquet.to_parquet(self.parquet_file_path, index=False, compression='snappy')
-                    print(f"✓ Base64 data saved to Parquet: {self.parquet_file_path}")
-                    print(f"  Parquet file size: {os.path.getsize(self.parquet_file_path) / (1024*1024):.2f} MB")
-                except Exception as e:
-                    print(f"   ⚠ Could not merge Parquet file: {e}")
+            try:
+                df_parquet = df_full[['url', 'title', 'pdf_path', 'base64_content']].copy()
+                df_parquet = df_parquet[df_parquet['base64_content'].notna()]  # Only rows with base64
+                
+                if not df_parquet.empty:
+                    # If parquet exists, merge to avoid losing previous data
+                    try:
+                        if os.path.exists(self.parquet_file_path):
+                            existing = pd.read_parquet(self.parquet_file_path)
+                            combined = pd.concat([existing, df_parquet], ignore_index=True)
+                            combined = combined.drop_duplicates(subset=['url'], keep='last')  # Keep latest attempt
+                            combined.to_parquet(self.parquet_file_path, index=False, compression='snappy')
+                        else:
+                            df_parquet.to_parquet(self.parquet_file_path, index=False, compression='snappy')
+                        print(f"✓ Base64 data saved to Parquet: {self.parquet_file_path}")
+                        print(f"  Parquet file size: {os.path.getsize(self.parquet_file_path) / (1024*1024):.2f} MB")
+                    except Exception as e:
+                        print(f"⚠️  Could not merge/save Parquet file: {e}")
+                else:
+                    print(f"ℹ️  No base64 content to save to Parquet")
+            except Exception as e:
+                print(f"⚠️  Error processing Parquet data: {e}")
         
         # Save metadata (without base64) to CSV (merge with existing CSV to keep history)
-        df_csv = df_full.drop(columns=['base64_content'], errors='ignore')
         try:
+            df_csv = df_full.drop(columns=['base64_content'], errors='ignore')
+            
             if os.path.exists(self.csv_file_path):
-                existing_csv = pd.read_csv(self.csv_file_path, encoding='utf-8-sig')
-                combined_csv = pd.concat([existing_csv, df_csv], ignore_index=True)
-                combined_csv = combined_csv.drop_duplicates(subset=['url'], keep='first')
-                combined_csv.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
+                try:
+                    existing_csv = pd.read_csv(self.csv_file_path, encoding='utf-8-sig')
+                    combined_csv = pd.concat([existing_csv, df_csv], ignore_index=True)
+                    combined_csv = combined_csv.drop_duplicates(subset=['url'], keep='last')  # Keep latest attempt
+                    combined_csv.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
+                    print(f"✓ Metadata merged and saved to CSV: {self.csv_file_path}")
+                except Exception as e:
+                    print(f"⚠️  Could not merge with existing CSV, saving new data only: {e}")
+                    df_csv.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
+                    print(f"✓ New metadata saved to CSV: {self.csv_file_path}")
             else:
                 df_csv.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
-            print(f"✓ Metadata saved to CSV: {self.csv_file_path}")
+                print(f"✓ Metadata saved to CSV: {self.csv_file_path}")
+                
         except Exception as e:
-            print(f"   ⚠ Could not save/merge CSV metadata: {e}")
+            print(f"❌ CRITICAL: Could not save CSV metadata: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Last resort: try to save with a timestamp to avoid losing data
+            try:
+                import datetime
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = self.csv_file_path.replace('.csv', f'_backup_{timestamp}.csv')
+                df_csv.to_csv(backup_path, index=False, encoding='utf-8-sig')
+                print(f"✓ Data saved to backup file: {backup_path}")
+            except Exception as e2:
+                print(f"❌ Could not save backup file: {e2}")
 
     def run(self, args: dict):
         """
@@ -872,8 +1024,34 @@ class ScribdScraper(ScraperStrategy):
             urls = self._load_urls_from_file()
             print(f"✓ Loaded {len(urls)} URLs")
 
+        # If retry-failed flag is provided, get URLs from CSV where pdf_downloaded=False
+        if args.get('retry_failed'):
+            print("\n→ Retry Failed mode: Loading URLs that failed PDF download...")
+            failed_urls = []
+            try:
+                if os.path.exists(self.csv_file_path):
+                    df = pd.read_csv(self.csv_file_path, encoding='utf-8-sig')
+                    if 'url' in df.columns and 'pdf_downloaded' in df.columns:
+                        # Get URLs where pdf_downloaded is False
+                        failed_df = df[df['pdf_downloaded'] == False]
+                        failed_urls = failed_df['url'].tolist()
+                        print(f"   ✓ Found {len(failed_urls)} URLs that failed PDF download")
+                    else:
+                        print(f"   ⚠ CSV missing required columns (url, pdf_downloaded)")
+                else:
+                    print(f"   ⚠ CSV file not found: {self.csv_file_path}")
+            except Exception as e:
+                print(f"   ⚠ Could not read CSV to find failed downloads: {e}")
+            
+            if failed_urls:
+                urls = set(failed_urls)
+                print(f"   ✓ Will retry {len(urls)} failed downloads")
+            else:
+                print(f"   ✗ No failed downloads found to retry")
+                urls = set()
+        
         # If resume flag is provided, filter out URLs already present in the CSV results
-        if args.get('resume'):
+        elif args.get('resume'):
             print("\n→ Resume mode: computing remaining URLs (filtering already processed)...")
             processed = set()
             try:
@@ -914,26 +1092,61 @@ class ScribdScraper(ScraperStrategy):
         
         results = []
         batch_size = 50  # Save every 50 documents to avoid losing progress
-        for i, url in enumerate(urls_to_process, 1):
-            print(f"\n[{i}/{len(urls_to_process)}]")
-            details = self.extract_recipe_details(url)
-            results.append(details)
-            
-            # Save intermediate results every batch_size documents
-            if i % batch_size == 0:
-                print(f"\n💾 Saving intermediate results ({i} documents)...")
-                self._save_results_to_csv(results)
-                print(f"✓ Progress saved!")
-            
-            time.sleep(0.3)  # Reduced from 0.5s - minimal delay between docs
         
-        # Save final results
-        if results:
-            self._save_results_to_csv(results)
+        try:
+            for i, url in enumerate(urls_to_process, 1):
+                try:
+                    print(f"\n[{i}/{len(urls_to_process)}]")
+                    details = self.extract_recipe_details(url)
+                    results.append(details)
+                    
+                    # Save intermediate results every batch_size documents
+                    if i % batch_size == 0:
+                        print(f"\n💾 Saving intermediate results ({i} documents)...")
+                        try:
+                            self._save_results_to_csv(results)
+                            print(f"✓ Progress saved!")
+                        except Exception as e:
+                            print(f"⚠️  Warning: Could not save intermediate results: {e}")
+                    
+                    time.sleep(0.3)  # Reduced from 0.5s - minimal delay between docs
+                    
+                except KeyboardInterrupt:
+                    print(f"\n⚠️  Interrupted by user at document {i}/{len(urls_to_process)}")
+                    print(f"💾 Saving {len(results)} processed documents before exit...")
+                    raise  # Re-raise to trigger finally block
+                    
+                except Exception as e:
+                    print(f"⚠️  Error processing URL {url}: {e}")
+                    # Continue to next URL even if this one failed
+                    continue
         
-        print(f"\n{'='*60}")
-        print(f"✓ Scraping completed!")
-        print(f"   Total documents processed: {len(results)}")
-        print(f"   PDFs downloaded: {sum(1 for r in results if r['pdf_downloaded'])}")
-        print(f"   Base64 saved to Parquet: {sum(1 for r in results if r.get('base64_content'))}")
-        print(f"{'='*60}\n")
+        except KeyboardInterrupt:
+            print(f"\n⚠️  Scraping interrupted by user (Ctrl+C)")
+        
+        except Exception as e:
+            print(f"\n❌ Unexpected error during scraping: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        finally:
+            # ALWAYS save results, even if there was an error or interruption
+            if results:
+                print(f"\n💾 Saving final results ({len(results)} documents)...")
+                try:
+                    self._save_results_to_csv(results)
+                    print(f"✓ Results saved successfully!")
+                except Exception as e:
+                    print(f"❌ CRITICAL: Could not save final results: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"\n⚠️  No results to save.")
+            
+            print(f"\n{'='*60}")
+            print(f"✓ Scraping session ended")
+            print(f"   Total documents processed: {len(results)}")
+            if results:
+                print(f"   PDFs downloaded: {sum(1 for r in results if r.get('pdf_downloaded', False))}")
+                print(f"   Base64 saved: {sum(1 for r in results if r.get('base64_content'))}")
+            print(f"{'='*60}\n")

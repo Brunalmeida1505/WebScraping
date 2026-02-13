@@ -1,6 +1,8 @@
 import os
 import time
 import pandas as pd
+import requests
+from urllib.parse import urlparse
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -19,6 +21,8 @@ class MyAmigurumiFarmScraper(ScraperStrategy):
         self.db_dir = 'db'
         self.url_file_path = os.path.join(self.db_dir, 'myamigurumifarm_urls.txt')
         self.csv_file_path = os.path.join(self.db_dir, 'resultados', 'myamigurumifarm_dados.csv')
+        self.images_dir = os.path.join('downloads', 'images', 'myamigurumifarm_images')
+        os.makedirs(self.images_dir, exist_ok=True)
 
     def get_name(self) -> str:
         return self.name
@@ -37,6 +41,81 @@ class MyAmigurumiFarmScraper(ScraperStrategy):
             return set()
         with open(self.url_file_path, 'r', encoding='utf-8') as f:
             return set(line.strip() for line in f if line.strip())
+
+    def _download_image(self, image_url: str, pattern_slug: str) -> str:
+        """Downloads an image and saves it locally with retry logic."""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                if not image_url or not image_url.startswith('http'):
+                    return "N/A"
+                
+                parsed_url = urlparse(image_url)
+                file_extension = os.path.splitext(parsed_url.path)[1] or '.jpg'
+                file_extension = file_extension.split('?')[0] if '?' in file_extension else file_extension
+                file_extension = file_extension if file_extension else '.jpg'
+                    
+                filename = f"{pattern_slug}{file_extension}"
+                filepath = os.path.join(self.images_dir, filename)
+                
+                if os.path.exists(filepath):
+                    file_size = os.path.getsize(filepath)
+                    if file_size > 1000:
+                        print(f"      Image already exists: {filename}")
+                        return filepath
+                    else:
+                        os.remove(filepath)
+                        print(f"      Corrupted image found, re-downloading...")
+                
+                print(f"      Downloading image (attempt {attempt + 1}/{max_retries})...")
+                response = requests.get(
+                    image_url, 
+                    timeout=15,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Referer': 'https://www.myamigurumifarm.com/'
+                    },
+                    stream=True
+                )
+                
+                if response.status_code == 200:
+                    with open(filepath, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    if os.path.exists(filepath) and os.path.getsize(filepath) > 1000:
+                        print(f"      ✓ Downloaded image: {filename} ({os.path.getsize(filepath)} bytes)")
+                        return filepath
+                    else:
+                        print(f"      ⚠ Downloaded file too small, retrying...")
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                        if attempt < max_retries - 1:
+                            time.sleep(2)
+                            continue
+                else:
+                    print(f"      Failed to download image: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    return "N/A"
+                    
+            except requests.exceptions.Timeout:
+                print(f"      ⚠ Download timeout (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return "N/A"
+            except Exception as e:
+                print(f"      Error downloading image: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return "N/A"
+        
+        return "N/A"
 
     def _scroll_to_load_all_content(self):
         """Scrolls down the page to trigger infinite scroll loading."""
@@ -169,6 +248,9 @@ class MyAmigurumiFarmScraper(ScraperStrategy):
             self.driver.execute_script("window.scrollTo(0, 0);")
             time.sleep(1)
             
+            # Extract pattern slug from URL for image filename
+            pattern_slug = url.rstrip('/').split('/')[-1]
+            
             # Extract title
             titulo = "N/A"
             try:
@@ -187,6 +269,126 @@ class MyAmigurumiFarmScraper(ScraperStrategy):
                         continue
             except:
                 pass
+            
+            # Image extraction - get first valid image from content
+            imagem_url = "N/A"
+            imagem_local = "N/A"
+            
+            print(f"   Searching for first content image...")
+            
+            try:
+                # Try to find images within the content area first
+                content_selectors = [
+                    (By.CSS_SELECTOR, '[data-testid="post-content"] img'),
+                    (By.CSS_SELECTOR, '.blog-post-description img'),
+                    (By.CSS_SELECTOR, 'article img'),
+                    (By.XPATH, '//article//img'),
+                ]
+                
+                content_images = []
+                for by, selector in content_selectors:
+                    try:
+                        content_images = self.driver.find_elements(by, selector)
+                        if content_images:
+                            print(f"   Found {len(content_images)} images in content area")
+                            break
+                    except:
+                        continue
+                
+                # If no content images found, try all images
+                if not content_images:
+                    content_images = self.driver.find_elements(By.TAG_NAME, 'img')
+                    print(f"   Found {len(content_images)} total images")
+                
+                # Try each image until we find a valid one
+                for img in content_images:
+                    try:
+                        # Get src from different possible attributes
+                        src = (img.get_attribute('data-lazy-src') or 
+                               img.get_attribute('data-src') or 
+                               img.get_attribute('data-srcset') or
+                               img.get_attribute('src'))
+                        
+                        if not src or src.startswith('data:'):
+                            continue
+                        
+                        # Handle srcset - get the first URL
+                        if ' ' in src:
+                            src = src.split(' ')[0].split(',')[0]
+                        
+                        # Handle relative URLs
+                        if src.startswith('//'):
+                            src = 'https:' + src
+                        elif src.startswith('/'):
+                            src = 'https://www.myamigurumifarm.com' + src
+                        
+                        # Skip common non-pattern images
+                        skip_keywords = ['logo', 'icon', 'avatar', 'gravatar', 'badge', 'banner', 'social', 'pixel', 'tracking', 'header', 'footer']
+                        src_lower = src.lower()
+                        img_class_lower = (img.get_attribute('class') or '').lower()
+                        img_alt_lower = (img.get_attribute('alt') or '').lower()
+                        
+                        # Skip if matches any skip keyword
+                        if any(keyword in src_lower or keyword in img_class_lower or keyword in img_alt_lower for keyword in skip_keywords):
+                            continue
+                        
+                        # Get image dimensions
+                        try:
+                            # Scroll to image
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", img)
+                            time.sleep(0.5)  # Wix needs more time
+                            
+                            width = self.driver.execute_script("""
+                                var img = arguments[0];
+                                if (img.complete && img.naturalWidth > 0) {
+                                    return img.naturalWidth;
+                                }
+                                return img.width || 0;
+                            """, img)
+                            
+                            height = self.driver.execute_script("""
+                                var img = arguments[0];
+                                if (img.complete && img.naturalHeight > 0) {
+                                    return img.naturalHeight;
+                                }
+                                return img.height || 0;
+                            """, img)
+                            
+                            # If dimensions are still 0, try attributes
+                            if not width or not height:
+                                try:
+                                    width = int(img.get_attribute('width') or 0)
+                                    height = int(img.get_attribute('height') or 0)
+                                except:
+                                    width = 0
+                                    height = 0
+                            
+                            # Skip very small images (likely icons/thumbnails)
+                            if not width or not height or width < 200 or height < 200:
+                                print(f"   Skipping small image: {width}x{height}")
+                                continue
+                            
+                            print(f"   Found valid image: {width}x{height}")
+                            
+                            # This is our first valid image, download it
+                            imagem_url = src
+                            imagem_local = self._download_image(imagem_url, pattern_slug)
+                            
+                            if imagem_local != "N/A":
+                                break  # Successfully downloaded, stop looking
+                            
+                        except Exception as e:
+                            print(f"   Error checking image dimensions: {e}")
+                            continue
+                            
+                    except Exception as e:
+                        continue
+                
+                if imagem_local == "N/A":
+                    print("   ⚠ Could not find/download a valid image")
+                    
+            except Exception as e:
+                print(f"   Error extracting images: {e}")
             
             # Extract content (materiais + receita)
             materiais = "N/A"
@@ -293,6 +495,8 @@ class MyAmigurumiFarmScraper(ScraperStrategy):
             return {
                 'titulo': titulo,
                 'url': url,
+                'imagem_url': imagem_url,
+                'imagem_local': imagem_local,
                 'materiais': materiais,
                 'receita': receita,
                 'origem': 'My Amigurumi Farm'
@@ -303,6 +507,8 @@ class MyAmigurumiFarmScraper(ScraperStrategy):
             return {
                 'titulo': "ERROR",
                 'url': url,
+                'imagem_url': "ERROR",
+                'imagem_local': "ERROR",
                 'materiais': "ERROR",
                 'receita': str(e),
                 'origem': 'My Amigurumi Farm'
@@ -314,7 +520,12 @@ class MyAmigurumiFarmScraper(ScraperStrategy):
         os.makedirs(results_dir, exist_ok=True)
         
         df = pd.DataFrame(results)
-        df.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig')
+        
+        # Reorder columns to match standard format
+        columns_order = ['titulo', 'url', 'imagem_url', 'imagem_local', 'materiais', 'receita', 'origem']
+        df = df[columns_order]
+        
+        df.to_csv(self.csv_file_path, index=False, encoding='utf-8-sig', sep=';')
         print(f"✓ Results saved to: {self.csv_file_path}")
 
     def run(self, args: dict):
