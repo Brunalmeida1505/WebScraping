@@ -22,14 +22,14 @@ arquivos_csv = glob.glob(os.path.join(pasta, "*.csv"))
 dfs = []
 
 for f in arquivos_csv:
+    nome = os.path.basename(f)
+    
+    # 🚫 SKIP SCRIBD CSVs - processaremos o Parquet com base64
+    if 'scribd' in nome.lower():
+        print(f"  ⏭️ {nome:30} → Ignorado (será processado do Parquet)")
+        continue
+    
     try:
-        nome = os.path.basename(f)
-        
-        # 🚫 SKIP SCRIBD CSVs - processaremos o Parquet com base64
-        if 'scribd' in nome.lower():
-            print(f"  ⏭️ {nome:30} → Será processado do Parquet")
-            continue
-        
         # Detectar separador automaticamente
         try:
             df_csv = pd.read_csv(f, sep=';', encoding='utf-8-sig', on_bad_lines='skip')
@@ -120,13 +120,13 @@ print(f"   • {len(df_export.columns)} colunas")
 print(f"   • Tamanho: {os.path.getsize(caminho_csv) / 1024 / 1024:.2f} MB")
 
 # ============================================================================
-# 2. RECEITAS COMPLETAS (todos os campos preenchidos)
+# 2. RECEITAS COMPLETAS (pelo menos com receita preenchida)
 # ============================================================================
+# Mudança: aceitar receitas que tenham pelo menos o campo 'receita' preenchido
+# (materiais pode estar vazio, já que alguns sites não separam essa informação)
 df_completas = df_completo[
     (df_completo['titulo'].notna()) & 
     (df_completo['titulo'] != '') &
-    (df_completo['materiais'].notna()) & 
-    (df_completo['materiais'] != '') &
     (df_completo['receita'].notna()) & 
     (df_completo['receita'] != '')
 ].copy()
@@ -137,7 +137,7 @@ caminho_completas = os.path.join(export_dir, 'amigurumi_receitas_completas.csv')
 df_completas.to_csv(caminho_completas, index=False, encoding='utf-8-sig')
 print(f"\n✅ 2. Receitas Completas: {caminho_completas}")
 print(f"   • {len(df_completas)} receitas ({len(df_completas)/len(df_completo)*100:.1f}%)")
-print(f"   • Apenas receitas com título + materiais + receita")
+print(f"   • Receitas com título + receita (materiais opcional)")
 print(f"   • Tamanho: {os.path.getsize(caminho_completas) / 1024 / 1024:.2f} MB")
 
 # ============================================================================
