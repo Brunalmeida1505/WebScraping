@@ -13,6 +13,7 @@ from scrapers.menagerie_scraper import MenagerieScraper
 from scrapers.lilleliis_scraper import LillelisScraper
 from scrapers.myamigurumifarm_scraper import MyAmigurumiFarmScraper
 from scrapers.amigurumitoday_scraper import AmigurumiTodayScraper
+from scrapers.aifanshub_scraper import AIFansHubScraper
 
 # Maps scraper names to their classes
 AVAILABLE_SCRAPERS = {
@@ -27,6 +28,7 @@ AVAILABLE_SCRAPERS = {
     "lilleliis": LillelisScraper,
     "myamigurumifarm": MyAmigurumiFarmScraper,
     "amigurumitoday": AmigurumiTodayScraper,
+    "aifanshub": AIFansHubScraper,
 }
 
 def setup_driver(headless: bool = True, scraper_name: str = None, use_profile: bool = False) -> webdriver.Chrome:
@@ -36,6 +38,9 @@ def setup_driver(headless: bool = True, scraper_name: str = None, use_profile: b
     # Ravelry usa API, não precisa de WebDriver
     if scraper_name == "ravelry":
         return None
+    
+    # AIFansHub PRECISA de Selenium para scroll dinâmico (mas pode funcionar com requests também)
+    # Outros scrapers que precisam de Selenium para funcionalidades específicas
     
     service = Service()
     options = webdriver.ChromeOptions()
@@ -170,13 +175,20 @@ def main():
         '--max-pages',
         type=int,
         default=None,
-        help='(Mariskavos, AlwaysFreeAmigurumi & Amigurum) Max number of pages/scrolls to scrape. If not specified, Amigurum will collect ALL recipes.'
+        help='(Mariskavos, AlwaysFreeAmigurumi, Amigurum & AIFansHub) Max number of pages/scrolls to scrape. If not specified, Amigurum will collect ALL recipes.'
     )
     parser.add_argument(
         '--limit',
         type=int,
         default=None,
-        help='(Scribd, Lovecrafts) Limit the number of documents/recipes to process.'
+        help='(Scribd, Lovecrafts & AIFansHub) Limit the number of documents/recipes to process.'
+    )
+    parser.add_argument(
+        '--label',
+        type=str,
+        default='amigurumi',
+        choices=['amigurumi', 'bags', 'style', 'all'],
+        help='(AIFansHub) Category to scrape: amigurumi (3 posts), bags (8 posts), style, or all (default: amigurumi).'
     )
     parser.add_argument(
         '--resume',
