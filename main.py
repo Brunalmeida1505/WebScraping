@@ -14,6 +14,7 @@ from scrapers.lilleliis_scraper import LillelisScraper
 from scrapers.myamigurumifarm_scraper import MyAmigurumiFarmScraper
 from scrapers.amigurumitoday_scraper import AmigurumiTodayScraper
 from scrapers.aifanshub_scraper import AIFansHubScraper
+from scrapers.crazypatterns_scraper import CrazyPatternsScraper
 
 # Maps scraper names to their classes
 AVAILABLE_SCRAPERS = {
@@ -29,6 +30,7 @@ AVAILABLE_SCRAPERS = {
     "myamigurumifarm": MyAmigurumiFarmScraper,
     "amigurumitoday": AmigurumiTodayScraper,
     "aifanshub": AIFansHubScraper,
+    "crazypatterns": CrazyPatternsScraper,
 }
 
 def setup_driver(headless: bool = True, scraper_name: str = None, use_profile: bool = False) -> webdriver.Chrome:

@@ -255,18 +255,59 @@ class AIFansHubScraperCore:
     def extract_pattern_data(self, url):
         """Extrai dados de um post de padrão"""
         try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Se temos WebDriver, usar Selenium para capturar conteúdo JavaScript
+            if self.driver:
+                self.driver.get(url)
+                time.sleep(3)  # Aguardar carregamento JavaScript
+                
+                # Scroll para carregar lazy loading
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(1)
+                
+                html_content = self.driver.page_source
+            else:
+                # Fallback para requests (sem JavaScript)
+                response = self.session.get(url, timeout=30)
+                response.raise_for_status()
+                html_content = response.text
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
             
             # IMPORTANTE: Limpar conteúdo após INTERNAL LINKS FOOTER
             soup = self.clean_soup_from_footer(soup)
             
-            # Título
+            # Título - tentar várias fontes
             title = None
-            title_elem = soup.find('h1')
-            if title_elem:
-                title = title_elem.get_text(strip=True)
+
+            # Método 0: <meta property="og:title"> – mais confiável na nova estrutura
+            meta_title = soup.find('meta', {'property': 'og:title'})
+            if meta_title:
+                title = meta_title.get('content', '').strip()
+                # Remover sufixo do site caso venha junto
+                title = re.sub(r'\s*\|\s*Free Crochet Pattern.*$', '', title, flags=re.I).strip()
+
+            # Método 1: <h1> tag
+            if not title:
+                title_elem = soup.find('h1')
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+
+            # Método 2: primeira h2 dentro do container de conteúdo (nova estrutura do site)
+            if not title:
+                content_el = soup.find('article', class_='post-content') or \
+                             soup.find('div', class_=re.compile(r'entry-content|post-content', re.I))
+                if content_el:
+                    first_h2 = content_el.find('h2')
+                    if first_h2:
+                        title = first_h2.get_text(strip=True)
+
+            # Método 3: <title> tag (último recurso)
+            if not title:
+                title_tag = soup.find('title')
+                if title_tag:
+                    title = title_tag.get_text(strip=True)
+                    # Remover nome do site do título
+                    title = re.sub(r'\s*[-|:]\s*(AIFansHub|Free Crochet Pattern).*$', '', title, flags=re.I).strip()
             
             # Materiais
             materiais = self.extract_materials(soup)
@@ -301,162 +342,393 @@ class AIFansHubScraperCore:
             return None
     
     def extract_materials(self, soup):
-        """Extrai lista de materiais"""
+        """Extrai lista de materiais (multilíngue - compatível com nova estrutura AIFansHub)"""
         materials = []
-        
-        # Procurar por seção de materiais
-        materials_section = soup.find(string=re.compile(r'Materials?:', re.I))
-        if materials_section:
-            # Tentar encontrar lista após "Materials:"
-            parent = materials_section.parent
-            if parent:
-                # Procurar próximos elementos que sejam listas ou texto
-                for sibling in parent.next_siblings:
-                    if sibling.name in ['ul', 'ol']:
-                        for li in sibling.find_all('li'):
+
+        # ── MÉTODO 0 (nova estrutura): h3 "Project Info" → ul > li com "Materials:..." ──
+        # Nova estrutura: h3 "Project Info" + ul com LIs "Difficulty:Easy", "Materials:Yarn..."
+        proj_header = soup.find(['h2', 'h3', 'h4'], string=re.compile(r'Project Info|Info Progetto|Información del Proyecto', re.I))
+        if proj_header:
+            ul = proj_header.find_next_sibling('ul')
+            if ul:
+                for li in ul.find_all('li'):
+                    text = li.get_text(strip=True)
+                    # LI contendo "Materials:" – extrair só o valor
+                    if re.match(r'Materials?\s*:', text, re.I):
+                        mat_value = re.sub(r'^Materials?\s*:\s*', '', text, flags=re.I).strip()
+                        # Separar por vírgula se houver múltiplos itens
+                        items = [m.strip() for m in mat_value.split(',') if len(m.strip()) > 3]
+                        materials.extend(items)
+                    # LI contendo "Hook Size:", "Yarn:", "Needle:" também são material
+                    elif re.match(r'(?:Hook Size|Yarn|Needle|Uncinetto|Filo|Gancho)\s*:', text, re.I):
+                        materials.append(text)
+            if materials:
+                return ' | '.join(materials)
+
+        # ── MÉTODO 1: header dedicado de materiais + ul/p seguinte ──
+        materials_patterns = [
+            r'Material',          # Genérico (Materials, Materiali, Materiales)
+            r'What You.?ll Need', # Inglês alternativo
+            r'Cosa Ti Serve',     # Italiano
+            r'Occorrente',        # Italiano
+        ]
+        for pattern in materials_patterns:
+            materials_header = soup.find(['h2', 'h3', 'h4', 'h5'], string=re.compile(pattern, re.I))
+            if materials_header:
+                next_sibling = materials_header.find_next_sibling()
+                while next_sibling:
+                    if next_sibling.name in ['ul', 'ol']:
+                        for li in next_sibling.find_all('li'):
                             text = li.get_text(strip=True)
-                            if text:
+                            if text and len(text) > 5:
                                 materials.append(text)
                         break
-                    elif sibling.string and ':' not in sibling.string and len(sibling.string.strip()) > 10:
-                        materials.append(sibling.string.strip())
-        
-        # Alternativa: procurar em PROJECT INFO
+                    if next_sibling.name == 'p':
+                        text = next_sibling.get_text(strip=True)
+                        if ',' in text and len(text) > 20:
+                            items = [m.strip() for m in text.split(',') if len(m.strip()) > 5]
+                            materials.extend(items)
+                            break
+                    if next_sibling.name in ['h2', 'h3', 'h4', 'h5']:
+                        break
+                    next_sibling = next_sibling.find_next_sibling()
+                if materials:
+                    break
+
+        # ── MÉTODO 2 (fallback): inline "Materials:" em texto ──
         if not materials:
-            project_info = soup.find(string=re.compile(r'PROJECT INFO', re.I))
-            if project_info:
-                parent = project_info.find_parent()
+            materials_section = soup.find(string=re.compile('|'.join(materials_patterns), re.I))
+            if materials_section:
+                parent = materials_section.parent
                 if parent:
-                    text = parent.get_text()
-                    # Procurar linha de Materials
-                    match = re.search(r'Materials?:\s*(.+?)(?:Hook Size:|Difficulty:|$)', text, re.I | re.DOTALL)
-                    if match:
-                        materials_text = match.group(1).strip()
-                        materials = [m.strip() for m in materials_text.split(',') if m.strip()]
-        
+                    for sibling in parent.next_siblings:
+                        if hasattr(sibling, 'name'):
+                            if sibling.name in ['ul', 'ol']:
+                                for li in sibling.find_all('li'):
+                                    text = li.get_text(strip=True)
+                                    if text:
+                                        materials.append(text)
+                                break
+                            elif sibling.name == 'p':
+                                t = sibling.get_text(strip=True)
+                                if t and ':' not in t and len(t) > 10:
+                                    materials.append(t)
+
         return ' | '.join(materials) if materials else None
     
     def extract_abbreviations(self, soup):
-        """Extrai abreviações de crochê"""
+        """Extrai abreviações de crochê (multilíngue - compatível com nova estrutura AIFansHub)"""
         abbreviations = {}
-        
-        # Método 1: Procurar pelo comentário HTML <!--ABBREVIATIONS -->
-        comments = soup.find_all(string=lambda text: isinstance(text, Comment))
-        for comment in comments:
-            if 'ABBREVIATIONS' in comment.upper():
-                # Pegar o próximo elemento <section> após o comentário
-                next_elem = comment.next_sibling
-                while next_elem:
-                    if hasattr(next_elem, 'name') and next_elem.name == 'section':
-                        # Encontrou a section de abreviações
-                        text = next_elem.get_text()
-                        # Padrão: MR: Magic Ring (adjustable loop)
-                        # Buscar linhas no formato "SIGLA: Descrição"
-                        lines = text.split('\n')
-                        for line in lines:
-                            line = line.strip()
-                            # Match: 1-4 letras maiúsculas seguidas de : e descrição
-                            match = re.match(r'^([A-Z]{1,4}):\s*(.+?)$', line)
+
+        # Padrões de headers de abreviações (multilíngue)
+        abbr_header_patterns = [
+            r'Key Abbreviations?',   # Nova estrutura inglês (h3 "Key Abbreviations")
+            r'KEY ABBREVIATIONS?',
+            r'ABBREVIAZIONI',        # Italiano
+            r'ABREVIATURAS',         # Espanhol
+            r'Stitches?\s+Used',     # Inglês alternativo
+            r'Punti Utilizzati',     # Italiano alternativo
+        ]
+
+        # ── MÉTODO 1 (prioritário): header + ul > li "SIGLA:Descrição" ──
+        for pattern in abbr_header_patterns:
+            abbr_header = soup.find(['h2', 'h3', 'h4', 'h5'], string=re.compile(pattern, re.I))
+            if abbr_header:
+                # Encontrar ul imediatamente depois
+                nxt = abbr_header.find_next_sibling()
+                while nxt:
+                    if nxt.name in ['ul', 'ol']:
+                        for li in nxt.find_all('li'):
+                            text = li.get_text(strip=True)
+                            # Formato: "MR:Magic Ring" ou "sc:Single Crochet" ou "sl st:Slip Stitch"
+                            match = re.match(r'^(.+?)\s*:\s*(.+)$', text)
                             if match:
                                 abbr = match.group(1).strip()
                                 meaning = match.group(2).strip()
-                                # Remover texto entre parênteses se houver
-                                meaning = re.sub(r'\s*\([^)]*\)\s*$', '', meaning)
-                                abbreviations[abbr] = meaning
+                                # Pular LIs que são frases longas (não são abreviações)
+                                if len(abbr) <= 10 and abbr not in ['KEY', 'ABBR', 'ABREV', 'NOTE']:
+                                    meaning = re.sub(r'\s*\([^)]*\)\s*$', '', meaning)
+                                    abbreviations[abbr] = meaning
                         break
-                    next_elem = next_elem.next_sibling
-                
-                # Se encontrou abreviações, não precisa procurar mais
+                    if nxt.name in ['h2', 'h3', 'h4', 'h5']:
+                        break
+                    nxt = nxt.find_next_sibling()
                 if abbreviations:
                     break
-        
-        # Método 2 (fallback): Procurar por seção KEY ABBREVIATIONS via texto
+
+        # ── MÉTODO 2: comentário HTML <!--ABBREVIATIONS--> ──
         if not abbreviations:
-            abbr_section = soup.find(string=re.compile(r'KEY ABBREVIATIONS', re.I))
-            if abbr_section:
-                parent = abbr_section.find_parent()
-                if parent:
-                    # Procurar lista de abreviações
-                    text = parent.get_text()
-                    # Padrão: MR: Magic Ring, sc: Single Crochet, etc
-                    matches = re.findall(r'([A-Z]{1,4}):\s*([^\n]+?)(?=\n|$)', text)
-                    for abbr, meaning in matches:
-                        abbr = abbr.strip()
-                        meaning = meaning.strip()
-                        # Pular a linha do título
-                        if abbr in ['KEY']:
-                            continue
-                        # Remover texto entre parênteses
-                        meaning = re.sub(r'\s*\([^)]*\)\s*$', '', meaning)
-                        abbreviations[abbr] = meaning
-        
+            comments = soup.find_all(string=lambda t: isinstance(t, Comment))
+            for comment in comments:
+                if 'ABBREVIATIONS' in comment.upper():
+                    next_elem = comment.next_sibling
+                    while next_elem:
+                        if hasattr(next_elem, 'name') and next_elem.name == 'section':
+                            text = next_elem.get_text()
+                            for line in text.split('\n'):
+                                line = line.strip()
+                                m = re.match(r'^([A-Z]{1,4}):\s*(.+?)$', line)
+                                if m:
+                                    abbr = m.group(1).strip()
+                                    meaning = m.group(2).strip()
+                                    meaning = re.sub(r'\s*\([^)]*\)\s*$', '', meaning)
+                                    abbreviations[abbr] = meaning
+                            break
+                        next_elem = next_elem.next_sibling
+                    if abbreviations:
+                        break
+
+        # ── MÉTODO 3 (fallback): busca por texto no documento ──
+        if not abbreviations:
+            for pattern in abbr_header_patterns:
+                abbr_section = soup.find(string=re.compile(pattern, re.I))
+                if abbr_section:
+                    parent = abbr_section.find_parent()
+                    if parent:
+                        text = parent.get_text()
+                        matches = re.findall(r'([A-Za-z]{1,6})\s*:\s*([^\n|]+)', text)
+                        for abbr, meaning in matches:
+                            abbr = abbr.strip()
+                            meaning = meaning.strip()
+                            if abbr.upper() in ['KEY', 'ABBR', 'ABREV', 'NOTE']:
+                                continue
+                            meaning = re.sub(r'\s*\([^)]*\)\s*$', '', meaning)
+                            if len(abbr) <= 8 and len(meaning) > 3:
+                                abbreviations[abbr] = meaning
+                    break
+
         if abbreviations:
-            # Formato: "MR: Magic Ring | sc: Single Crochet | ..."
             return ' | '.join([f"{k}: {v}" for k, v in abbreviations.items()])
         return None
     
     def extract_pattern_instructions(self, soup):
-        """Extrai instruções completas do padrão"""
+        """Extrai instruções completas do padrão (multilíngue e robusto - compatível com nova estrutura AIFansHub)"""
         instructions = []
-        
-        # Procurar por seção "THE PATTERN" ou seções numeradas
-        pattern_section = soup.find(string=re.compile(r'THE PATTERN|✨ THE PATTERN', re.I))
-        
-        if pattern_section:
-            parent = pattern_section.find_parent()
-            if parent:
-                # Encontrar todos os cabeçalhos de seção (SECTION 1, SECTION 2, etc)
-                sections = parent.find_all(['h3', 'h4'], string=re.compile(r'SECTION \d+|Part [A-Z]', re.I))
-                
-                for section in sections:
-                    section_title = section.get_text(strip=True)
-                    section_content = []
-                    
-                    # Pegar conteúdo após o cabeçalho até próximo cabeçalho
-                    for sibling in section.next_siblings:
-                        if sibling.name in ['h3', 'h4'] and re.search(r'SECTION \d+', sibling.get_text(), re.I):
-                            break
-                        
-                        if sibling.name in ['p', 'div']:
-                            text = sibling.get_text(strip=True)
-                            # Filtrar linhas de receita (começam com R1:, R2:, etc)
-                            if re.match(r'R\d+:', text):
-                                section_content.append(text)
-                    
-                    if section_content:
-                        instructions.append(f"[{section_title}]\n" + "\n".join(section_content))
-        
-        # Se não encontrou padrão estruturado, tentar busca genérica
+
+        # Headers que marcam início da receita (multilíngue)
+        pattern_header_re = re.compile(
+            r'^(?:The Pattern|Lo Schema|Il Pattern|El Patr[oó]n|SCHEMA|INSTRUCTIONS|ISTRUZIONI|'
+            r'✨\s*THE PATTERN|LO SCHEMA)$', re.I
+        )
+
+        # Sub-headers que indicam uma seção/fase (inglês, italiano, espanhol)
+        subpattern_re = re.compile(
+            r'Phase|Part[e]?|Sezione|Section|Body|Corpo|Cuerpo|Head|Testa|Cabeza|'
+            r'Arm|Braccio|Brazo|Leg|Gamba|Pierna|Ear|Orecchio|Oreja|'
+            r'Tail|Coda|Cola|Half|Met[aà]|Foundation|Cylinder|Rim|Flange|Base',
+            re.I
+        )
+
+        # ============================================================
+        # MÉTODO 1 (nova estrutura): h2 "The Pattern" → h3 fases → ul > li "Rn:..."
+        # ============================================================
+        content_el = (
+            soup.find('article', class_='post-content') or
+            soup.find('div', class_=re.compile(r'entry-content|post-content', re.I)) or
+            soup.find('article')
+        )
+
+        if content_el:
+            pat_header = content_el.find(['h2', 'h3', 'h4'], string=pattern_header_re)
+            if pat_header:
+                current = pat_header.find_next_sibling()
+                while current:
+                    txt = current.get_text(strip=True)
+
+                    # Parar se chegarmos em h2 não-relacionado à receita (ex: "What Our Community Says")
+                    if current.name == 'h2' and not subpattern_re.search(txt):
+                        break
+
+                    # Sub-seção de padrão (ex: "Phase 1: The Foundation (Base)")
+                    if current.name in ['h3', 'h4', 'h5'] and subpattern_re.search(txt):
+                        section_title = txt
+                        ul = current.find_next_sibling('ul')
+                        if ul:
+                            items = []
+                            for li in ul.find_all('li'):
+                                li_text = li.get_text(strip=True)
+                                # Pular LI de materiais dentro da seção de padrão
+                                if re.match(r'^Materials?\s*:', li_text, re.I):
+                                    continue
+                                if len(li_text) > 5:
+                                    items.append(li_text)
+                            if items:
+                                instructions.append(f"[{section_title}]")
+                                instructions.extend(items)
+                                instructions.append("")
+
+                    current = current.find_next_sibling()
+
+                if instructions:
+                    # Limpar linhas vazias extras no final
+                    while instructions and instructions[-1] == "":
+                        instructions.pop()
+
+        # ============================================================
+        # MÉTODO 2: buscar rounds (R\d+: / G\d+: / Round N: / Giro N:) em todo o artigo
+        # ============================================================
         if not instructions:
-            # Procurar todos os parágrafos com padrão R1:, R2:, etc
-            all_text = soup.get_text()
-            pattern_lines = re.findall(r'R\d+:.*?(?=R\d+:|$)', all_text, re.DOTALL)
-            if pattern_lines:
-                # Limpar e filtrar
-                instructions = [line.strip() for line in pattern_lines if len(line.strip()) > 10]
+            article = content_el or soup.find('article') or \
+                      soup.find('div', class_=re.compile(r'post|article|content', re.I))
+
+            if article:
+                round_patterns = [
+                    r'(?:^|\n)\s*R\d+:',       # R1:, R2: (inglês)
+                    r'(?:^|\n)\s*G\d+:',       # G1:, G2: (italiano - Giro)
+                    r'(?:^|\n)\s*Round \d+:',  # Round 1: (inglês)
+                    r'(?:^|\n)\s*Giro \d+:',   # Giro 1: (italiano)
+                    r'(?:^|\n)\s*Riga \d+:',   # Riga 1: (italiano)
+                    r'(?:^|\n)\s*Ronda \d+:',  # Ronda 1: (espanhol)
+                    r'(?:^|\n)\s*Fila \d+:',   # Fila 1: (espanhol)
+                ]
+
+                # Buscar também em LIs individuais (nova estrutura usa ul > li por round)
+                all_li_texts = [li.get_text(strip=True) for li in article.find_all('li')]
+                round_lis = [t for t in all_li_texts if re.match(r'^R\d+:|^G\d+:|^Round \d+|^Giro \d+', t)]
+                if round_lis:
+                    instructions = round_lis
+                else:
+                    text = article.get_text()
+                    for pattern in round_patterns:
+                        combined = '|'.join(round_patterns)
+                        matches = re.findall(f'{pattern}.*?(?=(?:{combined})|$)',
+                                            text, re.DOTALL | re.MULTILINE)
+                        if matches:
+                            cleaned = [m.strip() for m in matches if len(m.strip()) > 15]
+                            if cleaned:
+                                instructions = cleaned
+                                break
+
+        # ============================================================
+        # MÉTODO 3: palavras-chave de crochê em parágrafos (fallback)
+        # ============================================================
+        if not instructions:
+            article = content_el or soup.find('article') or \
+                      soup.find('div', class_=re.compile(r'post|article|content', re.I))
+            if article:
+                crochet_keywords = [
+                    r'\bsc\b', r'\bdc\b', r'\bhdc\b', r'\bslst?\b', r'\bch\b',
+                    r'\binc\b', r'\bdec\b', r'\bMR\b',
+                    r'\bmb\b', r'\bma\b', r'\baum\b', r'\bdim\b',
+                    r'\bcad\b', r'\bpb\b', r'\bpa\b',
+                ]
+                potential = []
+                for p in article.find_all(['p', 'li']):
+                    text = p.get_text(strip=True)
+                    kw_count = sum(1 for kw in crochet_keywords if re.search(kw, text, re.I))
+                    if kw_count >= 2 and len(text) > 30:
+                        potential.append(text)
+                if potential:
+                    instructions = potential[:20]
+
+        # ============================================================
+        # FORMATAÇÃO FINAL
+        # ============================================================
+        if instructions:
+            result = '\n'.join(instructions)
+            if len(result) > 10000:
+                result = result[:10000] + '\n[... receita truncada por limite de tamanho]'
+            return result
+
+        return None
+    
+    def _is_subpattern_header(self, text):
+        """Verifica se um header é uma sub-seção de padrão"""
+        subpattern_keywords = [
+            r'Part', r'Parte', r'Sezione',  # Partes do padrão
+            r'Body', r'Corpo', r'Cuerpo',   # Corpo
+            r'Head', r'Testa', r'Cabeza',   # Cabeça
+            r'Arm', r'Braccio', r'Brazo',   # Braço
+            r'Leg', r'Gamba', r'Pierna',    # Perna
+            r'Ear', r'Orecchio', r'Oreja',  # Orelha
+            r'Tail', r'Coda', r'Cola',      # Rabo
+            r'Metà', r'Half', r'Mitad',     # Metade
+            r'Nocciolo', r'Core', r'Núcleo' # Núcleo
+        ]
         
-        return '\n\n'.join(instructions) if instructions else None
+        for keyword in subpattern_keywords:
+            if re.search(keyword, text, re.I):
+                return True
+        return False
     
     def extract_main_image(self, soup, post_url):
-        """Extrai URL da imagem principal (primeira de alta qualidade)"""
-        # Procurar por imagens no conteúdo
-        img_tags = soup.find_all('img')
-        
-        for img in img_tags:
-            src = img.get('src') or img.get('data-src')
-            
+        """Extrai URL da imagem principal (primeira de alta qualidade, filtrada)"""
+
+        # Classes de conteúdo principal – imagens aqui são VÁLIDAS (não filtrar)
+        main_content_classes = {
+            'single-post-view__body', 'entry-content', 'post-content',
+            'post-body', 'article-body', 'content-body',
+        }
+
+        # Palavras-chave que indicam conteúdo NÃO-principal (sidebar, related, etc.)
+        unwanted_keywords = [
+            'sidebar', 'footer', 'related', 'widget',
+            'navigation', 'nav', 'menu', 'header',
+            'popular', 'recent', 'comments', 'author',
+            'recommended', 'similar', 'more-posts', 'post-card',
+        ]
+
+        def is_in_main_content(img_tag):
+            """Retorna True se a imagem estiver dentro de um container de conteúdo principal."""
+            p = img_tag.parent
+            while p:
+                classes_str = ' '.join(p.get('class', [])).lower()
+                # Se está dentro do conteúdo principal, ACEITAR
+                if any(mc in classes_str for mc in main_content_classes):
+                    return True
+                # Se está dentro de conteúdo não-principal, REJEITAR
+                if any(kw in classes_str for kw in unwanted_keywords):
+                    return False
+                pid = p.get('id', '').lower()
+                if any(kw in pid for kw in ['sidebar', 'footer', 'related', 'widget', 'nav']):
+                    return False
+                p = p.parent
+            return False
+
+        # ── ESTRATÉGIA 1: Imagem Blogger dentro do conteúdo principal ──
+        for img in soup.find_all('img'):
+            src = img.get('src') or img.get('data-src') or img.get('data-lazy-src') or ''
+            alt = img.get('alt', '')
+
             if not src:
                 continue
-            
-            # Pular imagens pequenas/ícones
-            if any(skip in src.lower() for skip in ['icon', 'logo', 'avatar', 'profile', 'favicon']):
+            if 'blogger.googleusercontent.com' not in src:
                 continue
-            
-            # URLs do Blogger - forçar alta qualidade
-            if 'blogger.googleusercontent.com' in src:
-                src = re.sub(r'/s\d+(-rw)?/', '/s1600/', src)
-                return urljoin(post_url, src)
-        
+            if 'flaticon.com' in src or 'cdn-icons' in src:
+                continue
+            if 'logo' in alt.lower() or 'logo' in src.lower():
+                continue
+
+            if not is_in_main_content(img):
+                continue
+
+            # Pular imagens muito pequenas (width/height < 100)
+            width = img.get('width')
+            height = img.get('height')
+            if width and height:
+                try:
+                    if int(width) < 100 or int(height) < 100:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            # Forçar máxima resolução: /wXXX-hYYY-.../ ou /sXXX/ → /s0/
+            if '/w' in src or re.search(r'/[wh]\d+', src):
+                src = re.sub(r'/[wh]\d+-[^/]+/', '/s0/', src)
+            if re.search(r'/s\d+', src):
+                src = re.sub(r'/s\d+(-\w+)?/', '/s0/', src)
+
+            return urljoin(post_url, src)
+
+        # ── ESTRATÉGIA 2 (fallback): og:image ──
+        og_image = soup.find('meta', {'property': 'og:image'})
+        if og_image:
+            og_url = og_image.get('content', '')
+            if og_url and 'blogger.googleusercontent.com' in og_url:
+                og_url = re.sub(r'/w\d+/', '/s0/', og_url)
+                og_url = re.sub(r'/s\d+(-\w+)?/', '/s0/', og_url)
+                return urljoin(post_url, og_url)
+
         return None
     
     def download_image(self, img_url, pattern_title):
@@ -473,7 +745,7 @@ class AIFansHubScraperCore:
             if width < 150 or height < 150:
                 return None
             
-            # Validar aspect ratio
+        # Validar aspect ratio
             aspect_ratio = max(width, height) / min(width, height)
             if aspect_ratio > 3.0:
                 return None
